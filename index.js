@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const { TenantCreditScoreAggregator } = require('./tenantCreditScoreAggregator');
+const AvailabilityService = require('./services/availabilityService');
+const AutoReclaimWorker = require('./services/autoReclaimWorker');
+
 const app = express();
 const port = 3000;
 const creditScoreAggregator = new TenantCreditScoreAggregator();
@@ -9,8 +11,8 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({ 
-    project: 'LeaseFlow Protocol', 
+  res.json({
+    project: 'LeaseFlow Protocol',
     status: 'Active',
     contract_id: 'CAEGD57WVTVQSYWYB23AISBW334QO7WNA5XQ56S45GH6BP3D2AVHKUG4'
   });
@@ -58,9 +60,38 @@ app.post('/tenant-credit-score/verify-token', (req, res) => {
 });
 
 if (require.main === module) {
-  app.listen(port, () => {
-    console.log(`LeaseFlow Backend listening at http://localhost:${port}`);
+  const availabilityService = new AvailabilityService();
+
+  availabilityService.initialize().then(() => {
+    app.locals.availabilityService = availabilityService;
+    app.listen(port, () => {
+      console.log(`LeaseFlow Backend listening at http://localhost:${port}`);
+      console.log('Availability Service started');
+    });
+  }).catch(error => {
+    console.error('Failed to initialize Availability Service:', error);
+app.get('/status', (req, res) => {
+  res.json({
+    auto_reclaim_worker: 'Active',
+    schedule: 'Every 10 minutes',
+    last_check: new Date().toISOString()
+  });
+});
+
+if (require.main === module) {
+  const autoReclaimWorker = new AutoReclaimWorker();
+
+  autoReclaimWorker.initialize().then(() => {
+    autoReclaimWorker.start();
+    app.listen(port, () => {
+      console.log(`LeaseFlow Backend listening at http://localhost:${port}`);
+      console.log('Auto-Reclaim Worker started');
+    });
+  }).catch(error => {
+    console.error('Failed to initialize Auto-Reclaim Worker:', error);
+    process.exit(1);
   });
 }
 
+const availabilityService = new AvailabilityService();
 module.exports = app;
