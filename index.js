@@ -19,6 +19,9 @@ const { NotificationService } = require('./src/services/notificationService');
 const { SorobanLeaseService } = require('./src/services/sorobanLeaseService');
 const { LeaseRenewalService } = require('./src/services/leaseRenewalService');
 const { LeaseRenewalJob, startLeaseRenewalScheduler } = require('./src/jobs/leaseRenewalJob');
+const { RentPaymentTrackerService } = require('./services/rentPaymentTrackerService');
+const { startPaymentTrackerJob } = require('./src/jobs/paymentTrackerJob');
+const { createPaymentRoutes } = require('./src/routes/paymentRoutes');
 
 /**
  * Create the Express app with injectable services for testing.
@@ -73,6 +76,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Routes
 app.use('/api/leases', leaseRoutes);
 app.use('/api/owners', ownerRoutes);
+app.use('/api', createPaymentRoutes(database));
 
 app.get('/', (req, res) => {
   res.json({ 
@@ -1021,6 +1025,14 @@ if (require.main === module) {
     );
     scheduler = startLeaseRenewalScheduler(new LeaseRenewalJob(leaseRenewalService), config);
   }
+
+  const paymentTrackerDb = new AppDatabase(config.database.filename);
+  const paymentTrackerService = new RentPaymentTrackerService(paymentTrackerDb, {
+    contractAccountId: config.contracts.defaultContractId,
+  });
+  startPaymentTrackerJob(paymentTrackerService, {
+    cronExpression: process.env.PAYMENT_TRACKER_CRON || '* * * * *',
+  });
 
   app.listen(port, () => {
     console.log(`LeaseFlow Backend running at http://localhost:${port}`);

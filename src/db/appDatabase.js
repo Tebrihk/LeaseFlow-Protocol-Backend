@@ -50,6 +50,9 @@ class AppDatabase {
         end_date TEXT NOT NULL,
         renewable INTEGER NOT NULL DEFAULT 1,
         disputed INTEGER NOT NULL DEFAULT 0,
+        tenant_account_id TEXT,
+        payment_status TEXT NOT NULL DEFAULT 'pending',
+        last_payment_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -100,6 +103,28 @@ class AppDatabase {
         message TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS payment_history (
+        id               TEXT PRIMARY KEY,
+        horizon_op_id    TEXT NOT NULL UNIQUE,
+        lease_id         TEXT,
+        tenant_account_id TEXT NOT NULL,
+        amount           TEXT NOT NULL,
+        asset_code       TEXT NOT NULL DEFAULT 'XLM',
+        asset_issuer     TEXT,
+        transaction_hash TEXT NOT NULL,
+        paid_at          TEXT NOT NULL,
+        recorded_at      TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_payment_history_lease_id
+        ON payment_history (lease_id);
+
+      CREATE INDEX IF NOT EXISTS idx_payment_history_tenant_account
+        ON payment_history (tenant_account_id);
+
+      CREATE INDEX IF NOT EXISTS idx_payment_history_paid_at
+        ON payment_history (paid_at);
     `);
   }
 
@@ -236,17 +261,20 @@ class AppDatabase {
         `
         SELECT
           id,
-          landlord_id AS landlordId,
-          tenant_id AS tenantId,
+          landlord_id       AS landlordId,
+          tenant_id         AS tenantId,
           status,
-          rent_amount AS rentAmount,
+          rent_amount       AS rentAmount,
           currency,
-          start_date AS startDate,
-          end_date AS endDate,
+          start_date        AS startDate,
+          end_date          AS endDate,
           renewable,
           disputed,
-          created_at AS createdAt,
-          updated_at AS updatedAt
+          tenant_account_id AS tenantAccountId,
+          payment_status    AS paymentStatus,
+          last_payment_at   AS lastPaymentAt,
+          created_at        AS createdAt,
+          updated_at        AS updatedAt
         FROM leases
         WHERE id = ?
       `,
@@ -495,6 +523,181 @@ class AppDatabase {
       `,
       )
       .all(proposalId);
+  }
+  // ---------------------------------------------------------------------------
+  // Payment history methods (Issue #16 — Real-Time Rent Payment Tracker)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Persist a new payment event.
+   *
+   * @param {object} payment Payment data from Horizon.
+   * @returns {object} The inserted payment record.
+   */
+  insertPayment(payment) {
+    const id = payment.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO payment_history (
+           id, horizon_op_id, lease_id, tenant_account_id,
+           amount, asset_code, asset_issuer, transaction_hash,
+           paid_at, recorded_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        payment.horizonOperationId,
+        payment.leaseId ?? null,
+        payment.tenantAccountId,
+        String(payment.amount),
+        payment.assetCode || 'XLM',
+        payment.assetIssuer ?? null,
+        payment.transactionHash,
+        payment.paidAt,
+        now,
+      );
+    return this.getPaymentByHorizonOpId(payment.horizonOperationId);
+  }
+
+  /**
+   * Fetch a payment record by Horizon operation ID (for deduplication).
+   *
+   * @param {string} horizonOpId Horizon operation identifier.
+   * @returns {object|null}
+   */
+  getPaymentByHorizonOpId(horizonOpId) {
+    const row = this.db
+      .prepare(
+        `SELECT
+           id,
+           horizon_op_id    AS horizonOpId,
+           lease_id         AS leaseId,
+           tenant_account_id AS tenantAccountId,
+           amount,
+           asset_code       AS assetCode,
+           asset_issuer     AS assetIssuer,
+           transaction_hash AS transactionHash,
+           paid_at          AS paidAt,
+           recorded_at      AS recordedAt
+         FROM payment_history
+         WHERE horizon_op_id = ?`,
+      )
+      .get(horizonOpId);
+
+    return row ?? null;
+  }
+
+  /**
+   * List all payments for a specific lease, most-recent first.
+   *
+   * @param {string} leaseId Lease identifier.
+   * @returns {object[]}
+   */
+  listPaymentsByLeaseId(leaseId) {
+    return this.db
+      .prepare(
+        `SELECT
+           id,
+           horizon_op_id    AS horizonOpId,
+           lease_id         AS leaseId,
+           tenant_account_id AS tenantAccountId,
+           amount,
+           asset_code       AS assetCode,
+           asset_issuer     AS assetIssuer,
+           transaction_hash AS transactionHash,
+           paid_at          AS paidAt,
+           recorded_at      AS recordedAt
+         FROM payment_history
+         WHERE lease_id = ?
+         ORDER BY paid_at DESC`,
+      )
+      .all(leaseId);
+  }
+
+  /**
+   * List all payments made from a specific Stellar account, most-recent first.
+   *
+   * @param {string} tenantAccountId Stellar account address.
+   * @returns {object[]}
+   */
+  listPaymentsByTenantAccount(tenantAccountId) {
+    return this.db
+      .prepare(
+        `SELECT
+           id,
+           horizon_op_id    AS horizonOpId,
+           lease_id         AS leaseId,
+           tenant_account_id AS tenantAccountId,
+           amount,
+           asset_code       AS assetCode,
+           asset_issuer     AS assetIssuer,
+           transaction_hash AS transactionHash,
+           paid_at          AS paidAt,
+           recorded_at      AS recordedAt
+         FROM payment_history
+         WHERE tenant_account_id = ?
+         ORDER BY paid_at DESC`,
+      )
+      .all(tenantAccountId);
+  }
+
+  /**
+   * Update a lease's payment_status and last_payment_at columns.
+   *
+   * @param {string} leaseId Lease identifier.
+   * @param {string} status  New payment status (e.g. 'paid').
+   * @param {string} paidAt  ISO timestamp of the payment.
+   * @returns {void}
+   */
+  updateLeasePaymentStatus(leaseId, status, paidAt) {
+    this.db
+      .prepare(
+        `UPDATE leases
+         SET payment_status  = ?,
+             last_payment_at = ?,
+             updated_at      = ?
+         WHERE id = ?`,
+      )
+      .run(status, paidAt, new Date().toISOString(), leaseId);
+  }
+
+  /**
+   * Find the active (non-disputed, status = 'active') lease for a given tenant
+   * Stellar account address so payments can be auto-matched.
+   *
+   * @param {string} tenantAccountId Stellar account address.
+   * @returns {object|null}
+   */
+  getActiveLeaseByTenantAccount(tenantAccountId) {
+    const row = this.db
+      .prepare(
+        `SELECT
+           id,
+           landlord_id       AS landlordId,
+           tenant_id         AS tenantId,
+           tenant_account_id AS tenantAccountId,
+           status,
+           rent_amount       AS rentAmount,
+           currency,
+           start_date        AS startDate,
+           end_date          AS endDate,
+           renewable,
+           disputed,
+           payment_status    AS paymentStatus,
+           last_payment_at   AS lastPaymentAt,
+           created_at        AS createdAt,
+           updated_at        AS updatedAt
+         FROM leases
+         WHERE tenant_account_id = ?
+           AND status = 'active'
+           AND disputed = 0
+         LIMIT 1`,
+      )
+      .get(tenantAccountId);
+
+    return row ? normalizeLeaseRow(row) : null;
   }
 }
 
