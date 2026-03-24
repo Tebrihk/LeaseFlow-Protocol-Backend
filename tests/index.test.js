@@ -6,10 +6,12 @@ describe('LeaseFlow Backend API', () => {
     const response = await request(app).get('/');
     expect(response.status).toBe(200);
     expect(response.headers['content-type']).toMatch(/json/);
-    expect(response.body).toEqual({
-      project: 'LeaseFlow Protocol',
-      status: 'Active',
-      contract_id: 'CAEGD57WVTVQSYWYB23AISBW334QO7WNA5XQ56S45GH6BP3D2AVHKUG4'
+    expect(response.body).toMatchObject({
+      project: 'LeaseFlow Protocol Backend',
+      status: 'Operational',
+      version: '1.0.0'
     });
+    expect(response.body.endpoints).toBeDefined();
+    expect(response.body.endpoints.upload_lease).toBe('POST /api/leases/upload');
   });
 });
