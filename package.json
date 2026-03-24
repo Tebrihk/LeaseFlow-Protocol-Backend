@@ -13,6 +13,7 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "pg": "^8.11.3"
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "jest": "^30.3.0",
