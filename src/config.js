@@ -27,6 +27,8 @@ function loadConfig(env = process.env) {
       renewalJobEnabled: env.LEASE_RENEWAL_JOB_ENABLED === 'true',
       intervalMs: Number(env.LEASE_RENEWAL_JOB_INTERVAL_MS || 24 * 60 * 60 * 1000),
       scanWindowDays: Number(env.LEASE_RENEWAL_SCAN_WINDOW_DAYS || 0),
+      lateFeeJobEnabled: env.LATE_FEE_JOB_ENABLED === 'true',
+      lateFeeCron: env.LATE_FEE_CRON || '0 0 * * *',
     },
     contracts: {
       defaultContractId: env.SOROBAN_CONTRACT_ID || DEFAULT_CONTRACT_ID,

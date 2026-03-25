@@ -22,6 +22,10 @@ const { LeaseRenewalJob, startLeaseRenewalScheduler } = require('./src/jobs/leas
 const { RentPaymentTrackerService } = require('./services/rentPaymentTrackerService');
 const { startPaymentTrackerJob } = require('./src/jobs/paymentTrackerJob');
 const { createPaymentRoutes } = require('./src/routes/paymentRoutes');
+const { LateFeeJob, startLateFeeScheduler } = require('./src/jobs/lateFeeJob');
+const { LateFeeService } = require('./src/services/lateFeeService');
+const { LateFeeController } = require('./src/controllers/LateFeeController');
+const { createLateFeeRoutes } = require('./src/routes/lateFeeRoutes');
 const { getUSDCToFiatRates, getXLMToUSDCPath } = require('./services/priceFeedService');
 const AvailabilityService = require('./services/availabilityService');
 const AssetMetadataService = require('./services/assetMetadataService');
@@ -70,6 +74,8 @@ function createApp(dependencies = {}) {
   const notificationService = dependencies.notificationService || new NotificationService(database);
   const sorobanLeaseService = dependencies.sorobanLeaseService || new SorobanLeaseService(config);
   const leaseRenewalService = dependencies.leaseRenewalService || new LeaseRenewalService(database, notificationService, sorobanLeaseService, config);
+  const lateFeeService = dependencies.lateFeeService || new LateFeeService(database, notificationService, sorobanLeaseService);
+  const lateFeeController = new LateFeeController(lateFeeService);
   const availabilityService = dependencies.availabilityService || new AvailabilityService();
   const assetMetadataService = dependencies.assetMetadataService || new AssetMetadataService();
   const creditScoreAggregator = dependencies.creditScoreAggregator || new TenantCreditScoreAggregator();
@@ -80,6 +86,7 @@ function createApp(dependencies = {}) {
   app.locals.database = database;
   app.locals.availabilityService = availabilityService;
   app.locals.assetMetadataService = assetMetadataService;
+  app.locals.lateFeeService = lateFeeService;
 
   // Middleware
   app.use(cors());
@@ -174,6 +181,7 @@ const port = process.env.PORT || 3000;
   // --- API Routes ---
   app.use('/api/leases', leaseRoutes);
   app.use('/api/owners', ownerRoutes);
+  app.use('/api/late-fees', createLateFeeRoutes(lateFeeController));
 
   // --- Lease Renewal Routes ---
   app.get('/renewal-proposals/:proposalId', requireActorAuth(actorAuthService), (req, res) => {
@@ -307,6 +315,12 @@ if (require.main === module) {
         const leaseRenewalService = new LeaseRenewalService(database, notificationService, sorobanLeaseService, config);
         startLeaseRenewalScheduler(new LeaseRenewalJob(leaseRenewalService), config);
         console.log('Lease renewal scheduler started');
+      }
+
+      if (config.jobs?.lateFeeJobEnabled) {
+        const lateFeeService = app.locals.lateFeeService;
+        startLateFeeScheduler(new LateFeeJob(lateFeeService), config);
+        console.log('Late fee enforcement scheduler started');
       }
 
       const reclaimWorker = new AutoReclaimWorker();

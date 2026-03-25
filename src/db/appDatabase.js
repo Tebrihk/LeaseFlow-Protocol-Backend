@@ -125,6 +125,51 @@ class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_payment_history_paid_at
         ON payment_history (paid_at);
+
+      CREATE TABLE IF NOT EXISTS late_fee_terms (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL UNIQUE,
+        daily_rate INTEGER NOT NULL DEFAULT 1000,
+        grace_period_days INTEGER NOT NULL DEFAULT 5,
+        max_fee_per_period INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS rent_payments (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        amount_due INTEGER NOT NULL,
+        amount_paid INTEGER NOT NULL DEFAULT 0,
+        date_paid TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_rent_payments_lease_period
+      ON rent_payments (lease_id, period);
+
+      CREATE TABLE IF NOT EXISTS late_fee_ledger (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        rent_payment_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        days_late INTEGER NOT NULL,
+        daily_rate INTEGER NOT NULL,
+        fee_amount INTEGER NOT NULL,
+        pending_debt_total INTEGER NOT NULL,
+        soroban_tx_status TEXT NOT NULL DEFAULT 'pending',
+        soroban_tx_hash TEXT,
+        assessed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_late_fee_ledger_lease
+      ON late_fee_ledger (lease_id);
     `);
   }
 
@@ -616,6 +661,197 @@ class AppDatabase {
       .all(leaseId);
   }
 
+  // --- Late Fee Terms ---
+
+  seedLateFeeTerms(terms) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO late_fee_terms (id, lease_id, daily_rate, grace_period_days, max_fee_per_period, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(lease_id) DO UPDATE SET
+           daily_rate = excluded.daily_rate,
+           grace_period_days = excluded.grace_period_days,
+           max_fee_per_period = excluded.max_fee_per_period,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        terms.id || crypto.randomUUID(),
+        terms.leaseId,
+        terms.dailyRate,
+        terms.gracePeriodDays,
+        terms.maxFeePerPeriod ?? null,
+        terms.enabled === false ? 0 : 1,
+        now,
+        now,
+      );
+  }
+
+  getLateFeeTermsByLeaseId(leaseId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, daily_rate AS dailyRate,
+                grace_period_days AS gracePeriodDays, max_fee_per_period AS maxFeePerPeriod,
+                enabled, created_at AS createdAt, updated_at AS updatedAt
+         FROM late_fee_terms WHERE lease_id = ?`,
+      )
+      .get(leaseId);
+    return row ? { ...row, enabled: Boolean(row.enabled) } : null;
+  }
+
+  // --- Rent Payments ---
+
+  insertRentPayment(payment) {
+    const id = payment.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO rent_payments (id, lease_id, period, due_date, amount_due, amount_paid, date_paid, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        payment.leaseId,
+        payment.period,
+        payment.dueDate,
+        payment.amountDue,
+        payment.amountPaid || 0,
+        payment.datePaid || null,
+        payment.status || 'pending',
+        now,
+        now,
+      );
+    return this.getRentPaymentById(id);
+  }
+
+  getRentPaymentById(paymentId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, period, due_date AS dueDate,
+                amount_due AS amountDue, amount_paid AS amountPaid,
+                date_paid AS datePaid, status,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM rent_payments WHERE id = ?`,
+      )
+      .get(paymentId);
+    return row || null;
+  }
+
+  getRentPaymentByLeasePeriod(leaseId, period) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, period, due_date AS dueDate,
+                amount_due AS amountDue, amount_paid AS amountPaid,
+                date_paid AS datePaid, status,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM rent_payments WHERE lease_id = ? AND period = ?`,
+      )
+      .get(leaseId, period);
+    return row || null;
+  }
+
+  listOverdueRentPayments(asOfDate) {
+    return this.db
+      .prepare(
+        `SELECT rp.id, rp.lease_id AS leaseId, rp.period, rp.due_date AS dueDate,
+                rp.amount_due AS amountDue, rp.amount_paid AS amountPaid,
+                rp.date_paid AS datePaid, rp.status,
+                rp.created_at AS createdAt, rp.updated_at AS updatedAt
+         FROM rent_payments rp
+         JOIN leases l ON l.id = rp.lease_id
+         WHERE rp.status = 'pending' AND rp.due_date < ? AND l.status = 'active'
+         ORDER BY rp.due_date ASC`,
+      )
+      .all(asOfDate);
+  }
+
+  updateRentPaymentStatus(paymentId, updates) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE rent_payments SET amount_paid = ?, date_paid = ?, status = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        updates.amountPaid,
+        updates.datePaid || null,
+        updates.status,
+        now,
+        paymentId,
+      );
+    return this.getRentPaymentById(paymentId);
+  }
+
+  // --- Late Fee Ledger ---
+
+  insertLateFeeEntry(entry) {
+    const id = entry.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO late_fee_ledger (id, lease_id, rent_payment_id, period, days_late, daily_rate, fee_amount, pending_debt_total, soroban_tx_status, soroban_tx_hash, assessed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        entry.leaseId,
+        entry.rentPaymentId,
+        entry.period,
+        entry.daysLate,
+        entry.dailyRate,
+        entry.feeAmount,
+        entry.pendingDebtTotal,
+        entry.sorobanTxStatus || 'pending',
+        entry.sorobanTxHash || null,
+        entry.assessedAt,
+        now,
+      );
+    return this.getLateFeeEntryById(id);
+  }
+
+  getLateFeeEntryById(entryId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE id = ?`,
+      )
+      .get(entryId);
+    return row || null;
+  }
+
+  getLatestLateFeeForPayment(rentPaymentId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE rent_payment_id = ?
+         ORDER BY assessed_at DESC LIMIT 1`,
+      )
+      .get(rentPaymentId);
+    return row || null;
+  }
+
+  listLateFeesByLeaseId(leaseId) {
+    return this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE lease_id = ?
+         ORDER BY assessed_at DESC`,
+      )
+      .all(leaseId);
+  }
+
   /**
    * List all payments made from a specific Stellar account, most-recent first.
    *
@@ -698,6 +934,26 @@ class AppDatabase {
       .get(tenantAccountId);
 
     return row ? normalizeLeaseRow(row) : null;
+  }
+
+  updateLateFeeEntryTxStatus(entryId, txStatus, txHash) {
+    this.db
+      .prepare(
+        `UPDATE late_fee_ledger SET soroban_tx_status = ?, soroban_tx_hash = ? WHERE id = ?`,
+      )
+      .run(txStatus, txHash || null, entryId);
+    return this.getLateFeeEntryById(entryId);
+  }
+
+  getTotalPendingDebtForLease(leaseId) {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(fee_amount), 0) AS totalDebt
+         FROM late_fee_ledger WHERE lease_id = ?`,
+      )
+      .get(leaseId);
+    return row ? row.totalDebt : 0;
+  }
   }
 }
 
