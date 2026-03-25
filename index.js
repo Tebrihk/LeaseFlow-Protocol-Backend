@@ -30,11 +30,13 @@ const { createConditionProofService } = require('./services/conditionProofServic
 const { createFileConditionProofStore } = require('./services/conditionProofStore');
 const { createSecurityDepositLockService, requireLockedSecurityDeposit } = require('./services/securityDepositLock');
 const { TenantCreditScoreAggregator } = require('./tenantCreditScoreAggregator');
+const SanctionsListScreeningWorker = require('./services/sanctionsListScreeningWorker');
 
 // Routes
 const leaseRoutes = require('./src/routes/leaseRoutes');
 const ownerRoutes = require('./src/routes/ownerRoutes');
 const kycRoutes = require('./src/routes/kycRoutes');
+const sanctionsRoutes = require('./src/routes/sanctionsRoutes');
 
 /**
  * Build authentication middleware for landlords and tenants.
@@ -84,65 +86,6 @@ function createApp(dependencies = {}) {
 
   // Middleware
   app.use(cors());
-  app.use(express.json());
-const express = require('express');
-const cors = require('cors');
-const { randomUUID } = require('crypto');
-
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-const sharp = require('sharp');
-const app = express();
-const port = 3000;
-const creditScoreAggregator = new TenantCreditScoreAggregator();
-const listings = [];
-const HORIZON_URL = process.env.HORIZON_URL || 'https://horizon.stellar.org';
-
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `${Date.now()}_${file.originalname}`)
-});
-const upload = multer({ storage });
-
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-// Routes
-app.use('/api/leases', leaseRoutes);
-app.use('/api/owners', ownerRoutes);
-app.use('/api', createPaymentRoutes(database));
-
-app.get('/', (req, res) => {
-  res.json({ 
-    project: 'LeaseFlow Protocol Backend', 
-    description: 'Secure Lease Indexer and Storage Facilitator',
-    status: 'Operational',
-    version: '1.0.0',
-    contract_id: process.env.CONTRACT_ID || 'CAEGD57WVTVQSYWYB23AISBW334QO7WNA5XQ56S45GH6BP3D2AVHKUG4',
-    endpoints: {
-      upload_lease: 'POST /api/leases/upload',
-      view_lease_handshake: 'GET /api/leases/:leaseCID/handshake',
-      top_owners: 'GET /api/owners/top'
-    }
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-const {
-  createConditionProofService,
-  ConditionProofError,
-} = require('./services/conditionProofService');
-const {
-  createFileConditionProofStore,
-} = require('./services/conditionProofStore');
-
-const port = process.env.PORT || 3000;
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
   
@@ -176,6 +119,7 @@ const port = process.env.PORT || 3000;
   app.use('/api/leases', leaseRoutes);
   app.use('/api/owners', ownerRoutes);
   app.use('/api/kyc', kycRoutes);
+  app.use('/api/sanctions', sanctionsRoutes);
 
   // --- Lease Renewal Routes ---
   app.get('/renewal-proposals/:proposalId', requireActorAuth(actorAuthService), (req, res) => {
@@ -317,53 +261,26 @@ if (require.main === module) {
       }).catch(err => {
         console.warn('AutoReclaimWorker failed to initialize:', err.message);
       });
-    },
-  );
 
-  return app;
-}
+      // Payment Tracker Job
+      const paymentTrackerService = new RentPaymentTrackerService(database, {
+        contractAccountId: config.contracts?.defaultContractId,
+      });
+      startPaymentTrackerJob(paymentTrackerService, {
+        cronExpression: process.env.PAYMENT_TRACKER_CRON || '* * * * *',
+      });
+      console.log('Payment tracker job started');
 
-const app = createApp();
-
-if (require.main === module) {
-  let scheduler;
-
-  if (config.jobs.renewalJobEnabled) {
-    const database = new AppDatabase(config.database.filename);
-    const notificationService = new NotificationService(database);
-    const sorobanLeaseService = new SorobanLeaseService(config);
-    const leaseRenewalService = new LeaseRenewalService(
-      database,
-      notificationService,
-      sorobanLeaseService,
-      config,
-    );
-    scheduler = startLeaseRenewalScheduler(new LeaseRenewalJob(leaseRenewalService), config);
-  }
-
-  const paymentTrackerDb = new AppDatabase(config.database.filename);
-  const paymentTrackerService = new RentPaymentTrackerService(paymentTrackerDb, {
-    contractAccountId: config.contracts.defaultContractId,
-  });
-  startPaymentTrackerJob(paymentTrackerService, {
-    cronExpression: process.env.PAYMENT_TRACKER_CRON || '* * * * *',
-  });
-
-  app.listen(port, () => {
-    console.log(`LeaseFlow Backend running at http://localhost:${port}`);
-    console.log(`Lease Encryption Service: Active`);
-    console.log(`IPFS Storage Service: Initialized (Host: ${process.env.IPFS_HOST || 'ipfs.infura.io'})`);
-    console.log(`LeaseFlow Backend listening at http://localhost:${port}`);
-    if (scheduler) {
-      console.log(`Lease renewal scheduler running every ${config.jobs.intervalMs}ms`);
-    }
-  const autoReclaimWorker = new AutoReclaimWorker();
-
-  autoReclaimWorker.initialize().then(() => {
-    autoReclaimWorker.start();
-    app.listen(port, () => {
-      console.log(`LeaseFlow Backend listening at http://localhost:${port}`);
-      console.log('Auto-Reclaim Worker started');
+      // Sanctions Screening Worker
+      if (config.sanctions?.screeningEnabled !== false) {
+        const sanctionsWorker = new SanctionsListScreeningWorker(config.sanctions);
+        sanctionsWorker.initialize().then(() => {
+          sanctionsWorker.start();
+          console.log('Sanctions screening worker started');
+        }).catch(err => {
+          console.warn('Sanctions screening worker failed to initialize:', err.message);
+        });
+      }
     });
   });
 }
