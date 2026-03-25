@@ -53,6 +53,11 @@ class AppDatabase {
         tenant_account_id TEXT,
         payment_status TEXT NOT NULL DEFAULT 'pending',
         last_payment_at TEXT,
+        landlord_stellar_address TEXT,
+        tenant_stellar_address TEXT,
+        sanctions_status TEXT DEFAULT 'CLEAN',
+        sanctions_check_at TEXT,
+        sanctions_violation_count INTEGER DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -151,6 +156,70 @@ class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_kyc_verifications_stellar_account
         ON kyc_verifications (stellar_account_id);
+
+      -- Sanctions screening tables
+      CREATE TABLE IF NOT EXISTS sanctions_violations (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        violation_type TEXT NOT NULL,
+        address TEXT NOT NULL,
+        sanctions_source TEXT NOT NULL,
+        sanctions_name TEXT,
+        sanctions_programs TEXT,
+        detected_at TEXT NOT NULL,
+        status TEXT DEFAULT 'ACTIVE',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS lease_freeze_events (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        freeze_reason TEXT NOT NULL,
+        freeze_details TEXT,
+        frozen_at TEXT NOT NULL,
+        unfrozen_at TEXT,
+        status TEXT DEFAULT 'FROZEN',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sanctions_cache (
+        id TEXT PRIMARY KEY,
+        address TEXT NOT NULL UNIQUE,
+        source TEXT NOT NULL,
+        name TEXT,
+        type TEXT,
+        programs TEXT,
+        regulation TEXT,
+        added_at TEXT NOT NULL,
+        expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS payment_schedules (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        amount TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        status TEXT DEFAULT 'PENDING',
+        sanctions_paused INTEGER DEFAULT 0,
+        sanctions_pause_reason TEXT,
+        sanctions_paused_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      -- Sanctions-related indexes
+      CREATE INDEX IF NOT EXISTS idx_sanctions_violations_lease_id ON sanctions_violations(lease_id);
+      CREATE INDEX IF NOT EXISTS idx_sanctions_violations_address ON sanctions_violations(address);
+      CREATE INDEX IF NOT EXISTS idx_sanctions_violations_status ON sanctions_violations(status);
+      CREATE INDEX IF NOT EXISTS idx_lease_freeze_events_lease_id ON lease_freeze_events(lease_id);
+      CREATE INDEX IF NOT EXISTS idx_sanctions_cache_address ON sanctions_cache(address);
+      CREATE INDEX IF NOT EXISTS idx_sanctions_cache_source ON sanctions_cache(source);
+      CREATE INDEX IF NOT EXISTS idx_sanctions_cache_expires_at ON sanctions_cache(expires_at);
     `);
   }
 
@@ -898,6 +967,285 @@ class AppDatabase {
       },
       leaseCanProceed: (landlordKyc?.kycStatus === 'verified' && tenantKyc?.kycStatus === 'verified')
     };
+  }
+/**
+   * Get active leases for sanctions screening
+   * @returns {Array} Array of active lease objects
+   */
+  getActiveLeases() {
+    const stmt = this.db.prepare(`
+      SELECT 
+        id,
+        landlord_id as landlordId,
+        tenant_id as tenantId,
+        landlord_stellar_address as landlordStellarAddress,
+        tenant_stellar_address as tenantStellarAddress,
+        status,
+        rent_amount as rentAmount,
+        currency,
+        start_date as startDate,
+        end_date as endDate,
+        created_at as createdAt
+      FROM leases 
+      WHERE status IN ('ACTIVE', 'PENDING') 
+      AND (landlord_stellar_address IS NOT NULL OR tenant_stellar_address IS NOT NULL)
+      ORDER BY created_at DESC
+    `);
+    
+    return stmt.all().map(normalizeLeaseRow);
+  }
+
+  /**
+   * Update lease status due to sanctions violation
+   * @param {string} leaseId - Lease ID
+   * @param {string} status - New status (e.g., 'FROZEN')
+   * @param {Object} metadata - Additional metadata
+   * @returns {boolean} Success status
+   */
+  updateLeaseStatus(leaseId, status, metadata = {}) {
+    const stmt = this.db.prepare(`
+      UPDATE leases 
+      SET status = ?,
+          sanctions_status = ?,
+          sanctions_check_at = ?,
+          sanctions_violation_count = sanctions_violation_count + 1,
+          updated_at = ?
+      WHERE id = ?
+    `);
+
+    const result = stmt.run(
+      status,
+      status === 'FROZEN' ? 'VIOLATION' : 'CLEAN',
+      new Date().toISOString(),
+      new Date().toISOString(),
+      leaseId
+    );
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Pause payment schedules for a lease
+   * @param {string} leaseId - Lease ID
+   * @param {Object} pauseDetails - Pause details
+   * @returns {boolean} Success status
+   */
+  pausePaymentSchedules(leaseId, pauseDetails) {
+    const stmt = this.db.prepare(`
+      UPDATE payment_schedules 
+      SET sanctions_paused = TRUE,
+          sanctions_pause_reason = ?,
+          sanctions_paused_at = ?,
+          updated_at = ?
+      WHERE lease_id = ? AND status = 'ACTIVE'
+    `);
+
+    const result = stmt.run(
+      pauseDetails.reason,
+      pauseDetails.pausedAt,
+      new Date().toISOString(),
+      leaseId
+    );
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Log sanctions violation
+   * @param {Object} violationData - Violation data
+   * @returns {boolean} Success status
+   */
+  logSanctionsViolation(violationData) {
+    const stmt = this.db.prepare(`
+      INSERT INTO sanctions_violations (
+        lease_id,
+        violation_type,
+        address,
+        sanctions_source,
+        sanctions_name,
+        sanctions_programs,
+        detected_at,
+        status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    try {
+      stmt.run(
+        violationData.leaseId,
+        violationData.violations[0]?.type || 'UNKNOWN',
+        violationData.violations[0]?.address || '',
+        violationData.violations[0]?.source || 'UNKNOWN',
+        violationData.violations[0]?.name || '',
+        JSON.stringify(violationData.violations[0]?.programs || []),
+        violationData.detectedAt,
+        'ACTIVE'
+      );
+      return true;
+    } catch (error) {
+      console.error('Failed to log sanctions violation:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get sanctions violations for a lease
+   * @param {string} leaseId - Lease ID
+   * @returns {Array} Array of violation objects
+   */
+  getSanctionsViolations(leaseId) {
+    const stmt = this.db.prepare(`
+      SELECT 
+        id,
+        lease_id as leaseId,
+        violation_type as violationType,
+        address,
+        sanctions_source as sanctionsSource,
+        sanctions_name as sanctionsName,
+        sanctions_programs as sanctionsPrograms,
+        detected_at as detectedAt,
+        status,
+        created_at as createdAt,
+        updated_at as updatedAt
+      FROM sanctions_violations 
+      WHERE lease_id = ?
+      ORDER BY detected_at DESC
+    `);
+
+    const rows = stmt.all(leaseId);
+    return rows.map(row => ({
+      ...row,
+      sanctionsPrograms: JSON.parse(row.sanctionsPrograms || '[]')
+    }));
+  }
+
+  /**
+   * Cache sanctions list entries
+   * @param {Array} sanctionsData - Array of sanctions entries
+   * @returns {boolean} Success status
+   */
+  cacheSanctionsList(sanctionsData) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO sanctions_cache (
+        address,
+        source,
+        name,
+        type,
+        programs,
+        regulation,
+        added_at,
+        expires_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const transaction = this.db.transaction(() => {
+      for (const entry of sanctionsData) {
+        stmt.run(
+          entry.address,
+          entry.source,
+          entry.name,
+          entry.type,
+          JSON.stringify(entry.programs || []),
+          entry.regulation || null,
+          entry.addedAt,
+          entry.expiresAt || new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(), // 6 hours
+          new Date().toISOString(),
+          new Date().toISOString()
+        );
+      }
+    });
+
+    try {
+      transaction();
+      return true;
+    } catch (error) {
+      console.error('Failed to cache sanctions list:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get cached sanctions entry for an address
+   * @param {string} address - Stellar address
+   * @returns {Object|null} Sanctions entry or null
+   */
+  getCachedSanctionsEntry(address) {
+    const stmt = this.db.prepare(`
+      SELECT 
+        address,
+        source,
+        name,
+        type,
+        programs,
+        regulation,
+        added_at as addedAt,
+        expires_at as expiresAt
+      FROM sanctions_cache 
+      WHERE address = ? AND expires_at > ?
+    `);
+
+    const row = stmt.get(address.toUpperCase(), new Date().toISOString());
+    
+    if (row) {
+      return {
+        ...row,
+        programs: JSON.parse(row.programs || '[]')
+      };
+    }
+    
+    return null;
+  }
+
+  /**
+   * Clean expired sanctions cache entries
+   * @returns {number} Number of entries cleaned
+   */
+  cleanExpiredSanctionsCache() {
+    const stmt = this.db.prepare(`
+      DELETE FROM sanctions_cache 
+      WHERE expires_at <= ?
+    `);
+
+    const result = stmt.run(new Date().toISOString());
+    return result.changes;
+  }
+
+  /**
+   * Get sanctions screening statistics
+   * @returns {Object} Statistics object
+   */
+  getSanctionsStatistics() {
+    const stats = {};
+
+    // Total violations
+    const totalViolationsStmt = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sanctions_violations WHERE status = 'ACTIVE'
+    `);
+    stats.totalActiveViolations = totalViolationsStmt.get().count;
+
+    // Frozen leases
+    const frozenLeasesStmt = this.db.prepare(`
+      SELECT COUNT(*) as count FROM leases WHERE status = 'FROZEN'
+    `);
+    stats.frozenLeases = frozenLeasesStmt.get().count;
+
+    // Cache size
+    const cacheSizeStmt = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sanctions_cache WHERE expires_at > ?
+    `);
+    stats.cacheSize = cacheSizeStmt.get(new Date().toISOString()).count;
+
+    // Violations by source
+    const violationsBySourceStmt = this.db.prepare(`
+      SELECT sanctions_source, COUNT(*) as count 
+      FROM sanctions_violations 
+      WHERE status = 'ACTIVE' 
+      GROUP BY sanctions_source
+    `);
+    stats.violationsBySource = violationsBySourceStmt.all();
+
+    return stats;
   }
 }
 
