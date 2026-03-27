@@ -8,6 +8,11 @@
 
 const express = require('express');
 
+function isRentCycleReached(startDate, now = new Date()) {
+  const cycleDay = new Date(startDate).getUTCDate();
+  return now.getUTCDate() >= cycleDay;
+}
+
 /**
  * @param {import('../db/appDatabase').AppDatabase} database
  * @returns {import('express').Router}
@@ -93,6 +98,133 @@ function createPaymentRoutes(database) {
     } catch (err) {
       console.error('[PaymentRoutes] Error listing tenant payments:', err);
       return res.status(500).json({ success: false, error: 'Failed to fetch tenant payments' });
+    }
+  });
+
+  /**
+   * POST /api/leases/:leaseId/utility-bills
+   * Landlord uploads utility bill details. Backend computes tenant share,
+   * updates upcoming payment totals, and stores reconciliation data.
+   */
+  router.post('/leases/:leaseId/utility-bills', (req, res) => {
+    const { leaseId } = req.params;
+    const {
+      landlord_id: landlordId,
+      bill_amount: billAmount,
+      tenant_share_ratio: tenantShareRatio,
+      currency = 'USDC',
+      billing_cycle: billingCycle,
+    } = req.body || {};
+
+    if (!leaseId || !leaseId.trim()) {
+      return res.status(400).json({ success: false, error: 'leaseId is required' });
+    }
+
+    if (!landlordId || !String(landlordId).trim()) {
+      return res.status(400).json({ success: false, error: 'landlord_id is required' });
+    }
+
+    if (!Number.isFinite(Number(billAmount)) || Number(billAmount) <= 0) {
+      return res.status(400).json({ success: false, error: 'bill_amount must be a positive number' });
+    }
+
+    const ratio = Number(tenantShareRatio);
+    if (!Number.isFinite(ratio) || ratio <= 0 || ratio > 1) {
+      return res.status(400).json({ success: false, error: 'tenant_share_ratio must be between 0 and 1' });
+    }
+
+    if (!billingCycle || !String(billingCycle).trim()) {
+      return res.status(400).json({ success: false, error: 'billing_cycle is required' });
+    }
+
+    try {
+      const lease = database.getLeaseById(leaseId.trim());
+      if (!lease) {
+        return res.status(404).json({ success: false, error: 'Lease not found' });
+      }
+
+      if (lease.landlordId !== String(landlordId).trim()) {
+        return res.status(403).json({ success: false, error: 'Only the lease landlord can upload utility bills' });
+      }
+
+      const tenantShareAmount = Number((Number(billAmount) * ratio).toFixed(2));
+
+      const utilityBill = database.insertUtilityBill({
+        leaseId: lease.id,
+        landlordId: String(landlordId).trim(),
+        billAmount: Number(billAmount),
+        tenantShareAmount,
+        currency,
+        billingCycle: String(billingCycle).trim(),
+      });
+
+      const utilityShareTotal = database.getPendingUtilityShareTotalByLeaseId(lease.id);
+      const upcoming = database.upsertUpcomingPaymentTotal({
+        leaseId: lease.id,
+        baseRentAmount: Number(lease.rentAmount),
+        utilityShareTotal,
+        approvalStatus: 'pending',
+      });
+
+      return res.status(201).json({
+        success: true,
+        lease_id: lease.id,
+        utility_bill: utilityBill,
+        upcoming_payment_total: upcoming.upcomingTotal,
+      });
+    } catch (err) {
+      console.error('[PaymentRoutes] Error reconciling utility bill:', err);
+      return res.status(500).json({ success: false, error: 'Failed to reconcile utility bill' });
+    }
+  });
+
+  /**
+   * GET /api/leases/:leaseId/upcoming-payment
+   * Returns the upcoming payment total (rent + utility share) and whether
+   * tenant approval is required for the current rent cycle.
+   */
+  router.get('/leases/:leaseId/upcoming-payment', (req, res) => {
+    const { leaseId } = req.params;
+
+    if (!leaseId || !leaseId.trim()) {
+      return res.status(400).json({ success: false, error: 'leaseId is required' });
+    }
+
+    try {
+      const lease = database.getLeaseById(leaseId.trim());
+      if (!lease) {
+        return res.status(404).json({ success: false, error: 'Lease not found' });
+      }
+
+      let upcoming = database.getUpcomingPaymentByLeaseId(lease.id);
+      if (!upcoming) {
+        const utilityShareTotal = database.getPendingUtilityShareTotalByLeaseId(lease.id);
+        upcoming = database.upsertUpcomingPaymentTotal({
+          leaseId: lease.id,
+          baseRentAmount: Number(lease.rentAmount),
+          utilityShareTotal,
+          approvalStatus: 'pending',
+        });
+      }
+
+      const rentCycleReached = isRentCycleReached(lease.startDate);
+      const utilityShareTotal = Number(upcoming.utilityShareTotal || 0);
+      const tenantApprovalRequired = rentCycleReached && utilityShareTotal > 0;
+
+      return res.status(200).json({
+        success: true,
+        lease_id: lease.id,
+        tenant_id: lease.tenantId,
+        base_rent_amount: upcoming.baseRentAmount,
+        utility_share_total: utilityShareTotal,
+        upcoming_payment_total: upcoming.upcomingTotal,
+        rent_cycle_reached: rentCycleReached,
+        tenant_approval_required: tenantApprovalRequired,
+        approval_status: upcoming.approvalStatus,
+      });
+    } catch (err) {
+      console.error('[PaymentRoutes] Error fetching upcoming payment:', err);
+      return res.status(500).json({ success: false, error: 'Failed to fetch upcoming payment' });
     }
   });
 
