@@ -39,6 +39,7 @@ const ownerRoutes = require('./src/routes/ownerRoutes');
 const kycRoutes = require('./src/routes/kycRoutes');
 const sanctionsRoutes = require('./src/routes/sanctionsRoutes');
 const evictionNoticeRoutes = require('./src/routes/evictionNoticeRoutes');
+const vendorRoutes = require('./src/routes/vendorRoutes');
 
 /**
  * Build authentication middleware for landlords and tenants.
@@ -123,6 +124,7 @@ function createApp(dependencies = {}) {
   app.use('/api/kyc', kycRoutes);
   app.use('/api/sanctions', sanctionsRoutes);
   app.use('/api/eviction-notices', evictionNoticeRoutes);
+  app.use('/api/vendors', vendorRoutes);
 
   // --- Lease Renewal Routes ---
   app.get('/renewal-proposals/:proposalId', requireActorAuth(actorAuthService), (req, res) => {
