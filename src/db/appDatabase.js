@@ -1,7 +1,7 @@
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const { DatabaseSync } = require("node:sqlite");
 
 /**
  * SQLite-backed persistence layer for leases and renewal proposals.
@@ -23,7 +23,7 @@ class AppDatabase {
    * @returns {void}
    */
   ensureDirectory() {
-    if (this.filename === ':memory:') {
+    if (this.filename === ":memory:") {
       return;
     }
 
@@ -53,6 +53,11 @@ class AppDatabase {
         tenant_account_id TEXT,
         payment_status TEXT NOT NULL DEFAULT 'pending',
         last_payment_at TEXT,
+        landlord_stellar_address TEXT,
+        tenant_stellar_address TEXT,
+        sanctions_status TEXT DEFAULT 'CLEAN',
+        sanctions_check_at TEXT,
+        sanctions_violation_count INTEGER DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -159,14 +164,14 @@ class AppDatabase {
    * @returns {T}
    */
   transaction(callback) {
-    this.db.exec('BEGIN');
+    this.db.exec("BEGIN");
 
     try {
       const result = callback();
-      this.db.exec('COMMIT');
+      this.db.exec("COMMIT");
       return result;
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      this.db.exec("ROLLBACK");
       throw error;
     }
   }
@@ -374,7 +379,9 @@ class AppDatabase {
         proposal.updatedAt,
         proposal.expiresAt,
         proposal.sorobanContractStatus,
-        proposal.sorobanContractReference ? JSON.stringify(proposal.sorobanContractReference) : null,
+        proposal.sorobanContractReference
+          ? JSON.stringify(proposal.sorobanContractReference)
+          : null,
       );
 
     return this.getRenewalProposalById(id);
@@ -486,7 +493,9 @@ class AppDatabase {
         proposal.rejectedBy || null,
         proposal.updatedAt,
         proposal.sorobanContractStatus,
-        proposal.sorobanContractReference ? JSON.stringify(proposal.sorobanContractReference) : null,
+        proposal.sorobanContractReference
+          ? JSON.stringify(proposal.sorobanContractReference)
+          : null,
         proposal.id,
       );
 
@@ -575,7 +584,7 @@ class AppDatabase {
         payment.leaseId ?? null,
         payment.tenantAccountId,
         String(payment.amount),
-        payment.assetCode || 'XLM',
+        payment.assetCode || "XLM",
         payment.assetIssuer ?? null,
         payment.transactionHash,
         payment.paidAt,
@@ -635,6 +644,197 @@ class AppDatabase {
          FROM payment_history
          WHERE lease_id = ?
          ORDER BY paid_at DESC`,
+      )
+      .all(leaseId);
+  }
+
+  // --- Late Fee Terms ---
+
+  seedLateFeeTerms(terms) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO late_fee_terms (id, lease_id, daily_rate, grace_period_days, max_fee_per_period, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(lease_id) DO UPDATE SET
+           daily_rate = excluded.daily_rate,
+           grace_period_days = excluded.grace_period_days,
+           max_fee_per_period = excluded.max_fee_per_period,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        terms.id || crypto.randomUUID(),
+        terms.leaseId,
+        terms.dailyRate,
+        terms.gracePeriodDays,
+        terms.maxFeePerPeriod ?? null,
+        terms.enabled === false ? 0 : 1,
+        now,
+        now,
+      );
+  }
+
+  getLateFeeTermsByLeaseId(leaseId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, daily_rate AS dailyRate,
+                grace_period_days AS gracePeriodDays, max_fee_per_period AS maxFeePerPeriod,
+                enabled, created_at AS createdAt, updated_at AS updatedAt
+         FROM late_fee_terms WHERE lease_id = ?`,
+      )
+      .get(leaseId);
+    return row ? { ...row, enabled: Boolean(row.enabled) } : null;
+  }
+
+  // --- Rent Payments ---
+
+  insertRentPayment(payment) {
+    const id = payment.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO rent_payments (id, lease_id, period, due_date, amount_due, amount_paid, date_paid, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        payment.leaseId,
+        payment.period,
+        payment.dueDate,
+        payment.amountDue,
+        payment.amountPaid || 0,
+        payment.datePaid || null,
+        payment.status || "pending",
+        now,
+        now,
+      );
+    return this.getRentPaymentById(id);
+  }
+
+  getRentPaymentById(paymentId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, period, due_date AS dueDate,
+                amount_due AS amountDue, amount_paid AS amountPaid,
+                date_paid AS datePaid, status,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM rent_payments WHERE id = ?`,
+      )
+      .get(paymentId);
+    return row || null;
+  }
+
+  getRentPaymentByLeasePeriod(leaseId, period) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, period, due_date AS dueDate,
+                amount_due AS amountDue, amount_paid AS amountPaid,
+                date_paid AS datePaid, status,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM rent_payments WHERE lease_id = ? AND period = ?`,
+      )
+      .get(leaseId, period);
+    return row || null;
+  }
+
+  listOverdueRentPayments(asOfDate) {
+    return this.db
+      .prepare(
+        `SELECT rp.id, rp.lease_id AS leaseId, rp.period, rp.due_date AS dueDate,
+                rp.amount_due AS amountDue, rp.amount_paid AS amountPaid,
+                rp.date_paid AS datePaid, rp.status,
+                rp.created_at AS createdAt, rp.updated_at AS updatedAt
+         FROM rent_payments rp
+         JOIN leases l ON l.id = rp.lease_id
+         WHERE rp.status = 'pending' AND rp.due_date < ? AND l.status = 'active'
+         ORDER BY rp.due_date ASC`,
+      )
+      .all(asOfDate);
+  }
+
+  updateRentPaymentStatus(paymentId, updates) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE rent_payments SET amount_paid = ?, date_paid = ?, status = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        updates.amountPaid,
+        updates.datePaid || null,
+        updates.status,
+        now,
+        paymentId,
+      );
+    return this.getRentPaymentById(paymentId);
+  }
+
+  // --- Late Fee Ledger ---
+
+  insertLateFeeEntry(entry) {
+    const id = entry.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO late_fee_ledger (id, lease_id, rent_payment_id, period, days_late, daily_rate, fee_amount, pending_debt_total, soroban_tx_status, soroban_tx_hash, assessed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        entry.leaseId,
+        entry.rentPaymentId,
+        entry.period,
+        entry.daysLate,
+        entry.dailyRate,
+        entry.feeAmount,
+        entry.pendingDebtTotal,
+        entry.sorobanTxStatus || "pending",
+        entry.sorobanTxHash || null,
+        entry.assessedAt,
+        now,
+      );
+    return this.getLateFeeEntryById(id);
+  }
+
+  getLateFeeEntryById(entryId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE id = ?`,
+      )
+      .get(entryId);
+    return row || null;
+  }
+
+  getLatestLateFeeForPayment(rentPaymentId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE rent_payment_id = ?
+         ORDER BY assessed_at DESC LIMIT 1`,
+      )
+      .get(rentPaymentId);
+    return row || null;
+  }
+
+  listLateFeesByLeaseId(leaseId) {
+    return this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE lease_id = ?
+         ORDER BY assessed_at DESC`,
       )
       .all(leaseId);
   }
@@ -878,6 +1078,13 @@ function normalizeProposalRow(row) {
     sorobanContractReference: row.sorobanContractReference
       ? JSON.parse(row.sorobanContractReference)
       : null,
+  };
+}
+
+function normalizeKycRow(row) {
+  return {
+    ...row,
+    isVerified: row.kycStatus === 'verified'
   };
 }
 
