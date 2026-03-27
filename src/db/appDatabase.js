@@ -1,7 +1,7 @@
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const { DatabaseSync } = require("node:sqlite");
 
 /**
  * SQLite-backed persistence layer for leases and renewal proposals.
@@ -23,7 +23,7 @@ class AppDatabase {
    * @returns {void}
    */
   ensureDirectory() {
-    if (this.filename === ':memory:') {
+    if (this.filename === ":memory:") {
       return;
     }
 
@@ -131,95 +131,28 @@ class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_payment_history_paid_at
         ON payment_history (paid_at);
 
-      CREATE TABLE IF NOT EXISTS kyc_verifications (
-        id TEXT PRIMARY KEY,
-        actor_id TEXT NOT NULL,
-        actor_role TEXT NOT NULL CHECK (actor_role IN ('landlord', 'tenant')),
-        stellar_account_id TEXT,
-        kyc_status TEXT NOT NULL DEFAULT 'pending' CHECK (kyc_status IN ('pending', 'in_progress', 'verified', 'rejected')),
-        anchor_provider TEXT NOT NULL,
-        verification_reference TEXT,
-        submitted_at TEXT,
-        verified_at TEXT,
-        rejected_at TEXT,
-        rejection_reason TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(actor_id, actor_role)
+      CREATE TABLE IF NOT EXISTS utility_bills (
+        id                TEXT PRIMARY KEY,
+        lease_id          TEXT NOT NULL,
+        landlord_id       TEXT NOT NULL,
+        bill_amount       REAL NOT NULL,
+        tenant_share_amount REAL NOT NULL,
+        currency          TEXT NOT NULL,
+        billing_cycle     TEXT NOT NULL,
+        created_at        TEXT NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_kyc_verifications_actor
-        ON kyc_verifications (actor_id, actor_role);
+      CREATE INDEX IF NOT EXISTS idx_utility_bills_lease_cycle
+        ON utility_bills (lease_id, billing_cycle);
 
-      CREATE INDEX IF NOT EXISTS idx_kyc_verifications_status
-        ON kyc_verifications (kyc_status);
-
-      CREATE INDEX IF NOT EXISTS idx_kyc_verifications_stellar_account
-        ON kyc_verifications (stellar_account_id);
-
-      -- Sanctions screening tables
-      CREATE TABLE IF NOT EXISTS sanctions_violations (
-        id TEXT PRIMARY KEY,
-        lease_id TEXT NOT NULL,
-        violation_type TEXT NOT NULL,
-        address TEXT NOT NULL,
-        sanctions_source TEXT NOT NULL,
-        sanctions_name TEXT,
-        sanctions_programs TEXT,
-        detected_at TEXT NOT NULL,
-        status TEXT DEFAULT 'ACTIVE',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+      CREATE TABLE IF NOT EXISTS upcoming_payments (
+        lease_id            TEXT PRIMARY KEY,
+        base_rent_amount    REAL NOT NULL,
+        utility_share_total REAL NOT NULL DEFAULT 0,
+        upcoming_total      REAL NOT NULL,
+        approval_status     TEXT NOT NULL DEFAULT 'pending',
+        updated_at          TEXT NOT NULL
       );
-
-      CREATE TABLE IF NOT EXISTS lease_freeze_events (
-        id TEXT PRIMARY KEY,
-        lease_id TEXT NOT NULL,
-        freeze_reason TEXT NOT NULL,
-        freeze_details TEXT,
-        frozen_at TEXT NOT NULL,
-        unfrozen_at TEXT,
-        status TEXT DEFAULT 'FROZEN',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS sanctions_cache (
-        id TEXT PRIMARY KEY,
-        address TEXT NOT NULL UNIQUE,
-        source TEXT NOT NULL,
-        name TEXT,
-        type TEXT,
-        programs TEXT,
-        regulation TEXT,
-        added_at TEXT NOT NULL,
-        expires_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS payment_schedules (
-        id TEXT PRIMARY KEY,
-        lease_id TEXT NOT NULL,
-        amount TEXT NOT NULL,
-        currency TEXT NOT NULL,
-        due_date TEXT NOT NULL,
-        status TEXT DEFAULT 'PENDING',
-        sanctions_paused INTEGER DEFAULT 0,
-        sanctions_pause_reason TEXT,
-        sanctions_paused_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      -- Sanctions-related indexes
-      CREATE INDEX IF NOT EXISTS idx_sanctions_violations_lease_id ON sanctions_violations(lease_id);
-      CREATE INDEX IF NOT EXISTS idx_sanctions_violations_address ON sanctions_violations(address);
-      CREATE INDEX IF NOT EXISTS idx_sanctions_violations_status ON sanctions_violations(status);
-      CREATE INDEX IF NOT EXISTS idx_lease_freeze_events_lease_id ON lease_freeze_events(lease_id);
-      CREATE INDEX IF NOT EXISTS idx_sanctions_cache_address ON sanctions_cache(address);
-      CREATE INDEX IF NOT EXISTS idx_sanctions_cache_source ON sanctions_cache(source);
-      CREATE INDEX IF NOT EXISTS idx_sanctions_cache_expires_at ON sanctions_cache(expires_at);
     `);
   }
 
@@ -231,14 +164,14 @@ class AppDatabase {
    * @returns {T}
    */
   transaction(callback) {
-    this.db.exec('BEGIN');
+    this.db.exec("BEGIN");
 
     try {
       const result = callback();
-      this.db.exec('COMMIT');
+      this.db.exec("COMMIT");
       return result;
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      this.db.exec("ROLLBACK");
       throw error;
     }
   }
@@ -446,7 +379,9 @@ class AppDatabase {
         proposal.updatedAt,
         proposal.expiresAt,
         proposal.sorobanContractStatus,
-        proposal.sorobanContractReference ? JSON.stringify(proposal.sorobanContractReference) : null,
+        proposal.sorobanContractReference
+          ? JSON.stringify(proposal.sorobanContractReference)
+          : null,
       );
 
     return this.getRenewalProposalById(id);
@@ -558,7 +493,9 @@ class AppDatabase {
         proposal.rejectedBy || null,
         proposal.updatedAt,
         proposal.sorobanContractStatus,
-        proposal.sorobanContractReference ? JSON.stringify(proposal.sorobanContractReference) : null,
+        proposal.sorobanContractReference
+          ? JSON.stringify(proposal.sorobanContractReference)
+          : null,
         proposal.id,
       );
 
@@ -647,7 +584,7 @@ class AppDatabase {
         payment.leaseId ?? null,
         payment.tenantAccountId,
         String(payment.amount),
-        payment.assetCode || 'XLM',
+        payment.assetCode || "XLM",
         payment.assetIssuer ?? null,
         payment.transactionHash,
         payment.paidAt,
@@ -707,6 +644,197 @@ class AppDatabase {
          FROM payment_history
          WHERE lease_id = ?
          ORDER BY paid_at DESC`,
+      )
+      .all(leaseId);
+  }
+
+  // --- Late Fee Terms ---
+
+  seedLateFeeTerms(terms) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO late_fee_terms (id, lease_id, daily_rate, grace_period_days, max_fee_per_period, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(lease_id) DO UPDATE SET
+           daily_rate = excluded.daily_rate,
+           grace_period_days = excluded.grace_period_days,
+           max_fee_per_period = excluded.max_fee_per_period,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        terms.id || crypto.randomUUID(),
+        terms.leaseId,
+        terms.dailyRate,
+        terms.gracePeriodDays,
+        terms.maxFeePerPeriod ?? null,
+        terms.enabled === false ? 0 : 1,
+        now,
+        now,
+      );
+  }
+
+  getLateFeeTermsByLeaseId(leaseId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, daily_rate AS dailyRate,
+                grace_period_days AS gracePeriodDays, max_fee_per_period AS maxFeePerPeriod,
+                enabled, created_at AS createdAt, updated_at AS updatedAt
+         FROM late_fee_terms WHERE lease_id = ?`,
+      )
+      .get(leaseId);
+    return row ? { ...row, enabled: Boolean(row.enabled) } : null;
+  }
+
+  // --- Rent Payments ---
+
+  insertRentPayment(payment) {
+    const id = payment.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO rent_payments (id, lease_id, period, due_date, amount_due, amount_paid, date_paid, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        payment.leaseId,
+        payment.period,
+        payment.dueDate,
+        payment.amountDue,
+        payment.amountPaid || 0,
+        payment.datePaid || null,
+        payment.status || "pending",
+        now,
+        now,
+      );
+    return this.getRentPaymentById(id);
+  }
+
+  getRentPaymentById(paymentId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, period, due_date AS dueDate,
+                amount_due AS amountDue, amount_paid AS amountPaid,
+                date_paid AS datePaid, status,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM rent_payments WHERE id = ?`,
+      )
+      .get(paymentId);
+    return row || null;
+  }
+
+  getRentPaymentByLeasePeriod(leaseId, period) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, period, due_date AS dueDate,
+                amount_due AS amountDue, amount_paid AS amountPaid,
+                date_paid AS datePaid, status,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM rent_payments WHERE lease_id = ? AND period = ?`,
+      )
+      .get(leaseId, period);
+    return row || null;
+  }
+
+  listOverdueRentPayments(asOfDate) {
+    return this.db
+      .prepare(
+        `SELECT rp.id, rp.lease_id AS leaseId, rp.period, rp.due_date AS dueDate,
+                rp.amount_due AS amountDue, rp.amount_paid AS amountPaid,
+                rp.date_paid AS datePaid, rp.status,
+                rp.created_at AS createdAt, rp.updated_at AS updatedAt
+         FROM rent_payments rp
+         JOIN leases l ON l.id = rp.lease_id
+         WHERE rp.status = 'pending' AND rp.due_date < ? AND l.status = 'active'
+         ORDER BY rp.due_date ASC`,
+      )
+      .all(asOfDate);
+  }
+
+  updateRentPaymentStatus(paymentId, updates) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE rent_payments SET amount_paid = ?, date_paid = ?, status = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        updates.amountPaid,
+        updates.datePaid || null,
+        updates.status,
+        now,
+        paymentId,
+      );
+    return this.getRentPaymentById(paymentId);
+  }
+
+  // --- Late Fee Ledger ---
+
+  insertLateFeeEntry(entry) {
+    const id = entry.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO late_fee_ledger (id, lease_id, rent_payment_id, period, days_late, daily_rate, fee_amount, pending_debt_total, soroban_tx_status, soroban_tx_hash, assessed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        entry.leaseId,
+        entry.rentPaymentId,
+        entry.period,
+        entry.daysLate,
+        entry.dailyRate,
+        entry.feeAmount,
+        entry.pendingDebtTotal,
+        entry.sorobanTxStatus || "pending",
+        entry.sorobanTxHash || null,
+        entry.assessedAt,
+        now,
+      );
+    return this.getLateFeeEntryById(id);
+  }
+
+  getLateFeeEntryById(entryId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE id = ?`,
+      )
+      .get(entryId);
+    return row || null;
+  }
+
+  getLatestLateFeeForPayment(rentPaymentId) {
+    const row = this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE rent_payment_id = ?
+         ORDER BY assessed_at DESC LIMIT 1`,
+      )
+      .get(rentPaymentId);
+    return row || null;
+  }
+
+  listLateFeesByLeaseId(leaseId) {
+    return this.db
+      .prepare(
+        `SELECT id, lease_id AS leaseId, rent_payment_id AS rentPaymentId, period,
+                days_late AS daysLate, daily_rate AS dailyRate, fee_amount AS feeAmount,
+                pending_debt_total AS pendingDebtTotal, soroban_tx_status AS sorobanTxStatus,
+                soroban_tx_hash AS sorobanTxHash, assessed_at AS assessedAt,
+                created_at AS createdAt
+         FROM late_fee_ledger WHERE lease_id = ?
+         ORDER BY assessed_at DESC`,
       )
       .all(leaseId);
   }
@@ -795,457 +923,134 @@ class AppDatabase {
     return row ? normalizeLeaseRow(row) : null;
   }
 
-  // ---------------------------------------------------------------------------
-  // KYC Verification methods (SEP-12 Stellar Anchor Integration)
-  // ---------------------------------------------------------------------------
-
   /**
-   * Insert or update a KYC verification record.
+   * Persist an uploaded utility bill and the computed tenant share.
    *
-   * @param {object} kycData KYC verification data.
-   * @returns {object} The inserted/updated KYC record.
+   * @param {object} utilityBill Utility billing payload.
+   * @returns {object}
    */
-  upsertKycVerification(kycData) {
+  insertUtilityBill(utilityBill) {
+    const id = utilityBill.id || crypto.randomUUID();
     const now = new Date().toISOString();
-    const id = kycData.id || crypto.randomUUID();
-    
+
     this.db
       .prepare(
-        `INSERT INTO kyc_verifications (
-           id, actor_id, actor_role, stellar_account_id, kyc_status, anchor_provider,
-           verification_reference, submitted_at, verified_at, rejected_at, rejection_reason,
-           created_at, updated_at
+        `INSERT INTO utility_bills (
+           id, lease_id, landlord_id, bill_amount, tenant_share_amount,
+           currency, billing_cycle, created_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(actor_id, actor_role) DO UPDATE SET
-           stellar_account_id = excluded.stellar_account_id,
-           kyc_status = excluded.kyc_status,
-           anchor_provider = excluded.anchor_provider,
-           verification_reference = excluded.verification_reference,
-           submitted_at = excluded.submitted_at,
-           verified_at = excluded.verified_at,
-           rejected_at = excluded.rejected_at,
-           rejection_reason = excluded.rejection_reason,
-           updated_at = excluded.updated_at`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
-        kycData.actorId,
-        kycData.actorRole,
-        kycData.stellarAccountId || null,
-        kycData.kycStatus || 'pending',
-        kycData.anchorProvider,
-        kycData.verificationReference || null,
-        kycData.submittedAt || null,
-        kycData.verifiedAt || null,
-        kycData.rejectedAt || null,
-        kycData.rejectionReason || null,
-        kycData.createdAt || now,
+        utilityBill.leaseId,
+        utilityBill.landlordId,
+        Number(utilityBill.billAmount),
+        Number(utilityBill.tenantShareAmount),
+        utilityBill.currency || 'USDC',
+        utilityBill.billingCycle,
         now,
       );
 
-    return this.getKycVerificationByActor(kycData.actorId, kycData.actorRole);
-  }
-
-  /**
-   * Fetch a KYC verification record by actor.
-   *
-   * @param {string} actorId Actor identifier.
-   * @param {string} actorRole Actor role ('landlord' or 'tenant').
-   * @returns {object|null}
-   */
-  getKycVerificationByActor(actorId, actorRole) {
-    const row = this.db
+    return this.db
       .prepare(
         `SELECT
            id,
-           actor_id AS actorId,
-           actor_role AS actorRole,
-           stellar_account_id AS stellarAccountId,
-           kyc_status AS kycStatus,
-           anchor_provider AS anchorProvider,
-           verification_reference AS verificationReference,
-           submitted_at AS submittedAt,
-           verified_at AS verifiedAt,
-           rejected_at AS rejectedAt,
-           rejection_reason AS rejectionReason,
-           created_at AS createdAt,
-           updated_at AS updatedAt
-         FROM kyc_verifications
-         WHERE actor_id = ? AND actor_role = ?`,
+           lease_id           AS leaseId,
+           landlord_id        AS landlordId,
+           bill_amount        AS billAmount,
+           tenant_share_amount AS tenantShareAmount,
+           currency,
+           billing_cycle      AS billingCycle,
+           created_at         AS createdAt
+         FROM utility_bills
+         WHERE id = ?`,
       )
-      .get(actorId, actorRole);
-
-    return row ? normalizeKycRow(row) : null;
+      .get(id);
   }
 
   /**
-   * Fetch a KYC verification record by Stellar account.
+   * Return the total tenant utility share awaiting reconciliation for a lease.
    *
-   * @param {string} stellarAccountId Stellar account address.
-   * @returns {object|null}
+   * @param {string} leaseId Lease identifier.
+   * @returns {number}
    */
-  getKycVerificationByStellarAccount(stellarAccountId) {
+  getPendingUtilityShareTotalByLeaseId(leaseId) {
     const row = this.db
       .prepare(
-        `SELECT
-           id,
-           actor_id AS actorId,
-           actor_role AS actorRole,
-           stellar_account_id AS stellarAccountId,
-           kyc_status AS kycStatus,
-           anchor_provider AS anchorProvider,
-           verification_reference AS verificationReference,
-           submitted_at AS submittedAt,
-           verified_at AS verifiedAt,
-           rejected_at AS rejectedAt,
-           rejection_reason AS rejectionReason,
-           created_at AS createdAt,
-           updated_at AS updatedAt
-         FROM kyc_verifications
-         WHERE stellar_account_id = ?`,
+        `SELECT COALESCE(SUM(tenant_share_amount), 0) AS total
+         FROM utility_bills
+         WHERE lease_id = ?`,
       )
-      .get(stellarAccountId);
+      .get(leaseId);
 
-    return row ? normalizeKycRow(row) : null;
+    return Number(row?.total || 0);
   }
 
   /**
-   * Update KYC verification status.
+   * Upsert the current upcoming payment total for a lease.
    *
-   * @param {string} actorId Actor identifier.
-   * @param {string} actorRole Actor role.
-   * @param {string} newStatus New KYC status.
-   * @param {object} additionalFields Additional fields to update.
+   * @param {object} payload Upcoming payment totals.
    * @returns {object|null}
    */
-  updateKycStatus(actorId, actorRole, newStatus, additionalFields = {}) {
+  upsertUpcomingPaymentTotal(payload) {
+    const baseRentAmount = Number(payload.baseRentAmount);
+    const utilityShareTotal = Number(payload.utilityShareTotal || 0);
+    const upcomingTotal = baseRentAmount + utilityShareTotal;
     const now = new Date().toISOString();
-    const updateFields = {
-      kyc_status: newStatus,
-      updated_at: now,
-      ...additionalFields
-    };
-
-    const setClause = Object.keys(updateFields).map(key => `${key} = ?`).join(', ');
-    const values = Object.values(updateFields);
 
     this.db
       .prepare(
-        `UPDATE kyc_verifications
-         SET ${setClause}
-         WHERE actor_id = ? AND actor_role = ?`,
+        `INSERT INTO upcoming_payments (
+           lease_id,
+           base_rent_amount,
+           utility_share_total,
+           upcoming_total,
+           approval_status,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(lease_id) DO UPDATE SET
+           base_rent_amount = excluded.base_rent_amount,
+           utility_share_total = excluded.utility_share_total,
+           upcoming_total = excluded.upcoming_total,
+           approval_status = excluded.approval_status,
+           updated_at = excluded.updated_at`,
       )
-      .run(...values, actorId, actorRole);
-
-    return this.getKycVerificationByActor(actorId, actorRole);
-  }
-
-  /**
-   * Check if both landlord and tenant are verified for a lease.
-   *
-   * @param {string} landlordId Landlord identifier.
-   * @param {string} tenantId Tenant identifier.
-   * @returns {object} Verification status for both parties.
-   */
-  checkLeaseKycCompliance(landlordId, tenantId) {
-    const landlordKyc = this.getKycVerificationByActor(landlordId, 'landlord');
-    const tenantKyc = this.getKycVerificationByActor(tenantId, 'tenant');
-
-    return {
-      landlord: {
-        id: landlordId,
-        isVerified: landlordKyc?.kycStatus === 'verified',
-        kycStatus: landlordKyc?.kycStatus || 'not_started',
-        verification: landlordKyc
-      },
-      tenant: {
-        id: tenantId,
-        isVerified: tenantKyc?.kycStatus === 'verified',
-        kycStatus: tenantKyc?.kycStatus || 'not_started',
-        verification: tenantKyc
-      },
-      leaseCanProceed: (landlordKyc?.kycStatus === 'verified' && tenantKyc?.kycStatus === 'verified')
-    };
-  }
-/**
-   * Get active leases for sanctions screening
-   * @returns {Array} Array of active lease objects
-   */
-  getActiveLeases() {
-    const stmt = this.db.prepare(`
-      SELECT 
-        id,
-        landlord_id as landlordId,
-        tenant_id as tenantId,
-        landlord_stellar_address as landlordStellarAddress,
-        tenant_stellar_address as tenantStellarAddress,
-        status,
-        rent_amount as rentAmount,
-        currency,
-        start_date as startDate,
-        end_date as endDate,
-        created_at as createdAt
-      FROM leases 
-      WHERE status IN ('ACTIVE', 'PENDING') 
-      AND (landlord_stellar_address IS NOT NULL OR tenant_stellar_address IS NOT NULL)
-      ORDER BY created_at DESC
-    `);
-    
-    return stmt.all().map(normalizeLeaseRow);
-  }
-
-  /**
-   * Update lease status due to sanctions violation
-   * @param {string} leaseId - Lease ID
-   * @param {string} status - New status (e.g., 'FROZEN')
-   * @param {Object} metadata - Additional metadata
-   * @returns {boolean} Success status
-   */
-  updateLeaseStatus(leaseId, status, metadata = {}) {
-    const stmt = this.db.prepare(`
-      UPDATE leases 
-      SET status = ?,
-          sanctions_status = ?,
-          sanctions_check_at = ?,
-          sanctions_violation_count = sanctions_violation_count + 1,
-          updated_at = ?
-      WHERE id = ?
-    `);
-
-    const result = stmt.run(
-      status,
-      status === 'FROZEN' ? 'VIOLATION' : 'CLEAN',
-      new Date().toISOString(),
-      new Date().toISOString(),
-      leaseId
-    );
-
-    return result.changes > 0;
-  }
-
-  /**
-   * Pause payment schedules for a lease
-   * @param {string} leaseId - Lease ID
-   * @param {Object} pauseDetails - Pause details
-   * @returns {boolean} Success status
-   */
-  pausePaymentSchedules(leaseId, pauseDetails) {
-    const stmt = this.db.prepare(`
-      UPDATE payment_schedules 
-      SET sanctions_paused = TRUE,
-          sanctions_pause_reason = ?,
-          sanctions_paused_at = ?,
-          updated_at = ?
-      WHERE lease_id = ? AND status = 'ACTIVE'
-    `);
-
-    const result = stmt.run(
-      pauseDetails.reason,
-      pauseDetails.pausedAt,
-      new Date().toISOString(),
-      leaseId
-    );
-
-    return result.changes > 0;
-  }
-
-  /**
-   * Log sanctions violation
-   * @param {Object} violationData - Violation data
-   * @returns {boolean} Success status
-   */
-  logSanctionsViolation(violationData) {
-    const stmt = this.db.prepare(`
-      INSERT INTO sanctions_violations (
-        lease_id,
-        violation_type,
-        address,
-        sanctions_source,
-        sanctions_name,
-        sanctions_programs,
-        detected_at,
-        status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    try {
-      stmt.run(
-        violationData.leaseId,
-        violationData.violations[0]?.type || 'UNKNOWN',
-        violationData.violations[0]?.address || '',
-        violationData.violations[0]?.source || 'UNKNOWN',
-        violationData.violations[0]?.name || '',
-        JSON.stringify(violationData.violations[0]?.programs || []),
-        violationData.detectedAt,
-        'ACTIVE'
+      .run(
+        payload.leaseId,
+        baseRentAmount,
+        utilityShareTotal,
+        upcomingTotal,
+        payload.approvalStatus || 'pending',
+        now,
       );
-      return true;
-    } catch (error) {
-      console.error('Failed to log sanctions violation:', error);
-      return false;
-    }
+
+    return this.getUpcomingPaymentByLeaseId(payload.leaseId);
   }
 
   /**
-   * Get sanctions violations for a lease
-   * @param {string} leaseId - Lease ID
-   * @returns {Array} Array of violation objects
+   * Fetch upcoming payment totals for a lease.
+   *
+   * @param {string} leaseId Lease identifier.
+   * @returns {object|null}
    */
-  getSanctionsViolations(leaseId) {
-    const stmt = this.db.prepare(`
-      SELECT 
-        id,
-        lease_id as leaseId,
-        violation_type as violationType,
-        address,
-        sanctions_source as sanctionsSource,
-        sanctions_name as sanctionsName,
-        sanctions_programs as sanctionsPrograms,
-        detected_at as detectedAt,
-        status,
-        created_at as createdAt,
-        updated_at as updatedAt
-      FROM sanctions_violations 
-      WHERE lease_id = ?
-      ORDER BY detected_at DESC
-    `);
+  getUpcomingPaymentByLeaseId(leaseId) {
+    const row = this.db
+      .prepare(
+        `SELECT
+           lease_id            AS leaseId,
+           base_rent_amount    AS baseRentAmount,
+           utility_share_total AS utilityShareTotal,
+           upcoming_total      AS upcomingTotal,
+           approval_status     AS approvalStatus,
+           updated_at          AS updatedAt
+         FROM upcoming_payments
+         WHERE lease_id = ?`,
+      )
+      .get(leaseId);
 
-    const rows = stmt.all(leaseId);
-    return rows.map(row => ({
-      ...row,
-      sanctionsPrograms: JSON.parse(row.sanctionsPrograms || '[]')
-    }));
-  }
-
-  /**
-   * Cache sanctions list entries
-   * @param {Array} sanctionsData - Array of sanctions entries
-   * @returns {boolean} Success status
-   */
-  cacheSanctionsList(sanctionsData) {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO sanctions_cache (
-        address,
-        source,
-        name,
-        type,
-        programs,
-        regulation,
-        added_at,
-        expires_at,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const transaction = this.db.transaction(() => {
-      for (const entry of sanctionsData) {
-        stmt.run(
-          entry.address,
-          entry.source,
-          entry.name,
-          entry.type,
-          JSON.stringify(entry.programs || []),
-          entry.regulation || null,
-          entry.addedAt,
-          entry.expiresAt || new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(), // 6 hours
-          new Date().toISOString(),
-          new Date().toISOString()
-        );
-      }
-    });
-
-    try {
-      transaction();
-      return true;
-    } catch (error) {
-      console.error('Failed to cache sanctions list:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Get cached sanctions entry for an address
-   * @param {string} address - Stellar address
-   * @returns {Object|null} Sanctions entry or null
-   */
-  getCachedSanctionsEntry(address) {
-    const stmt = this.db.prepare(`
-      SELECT 
-        address,
-        source,
-        name,
-        type,
-        programs,
-        regulation,
-        added_at as addedAt,
-        expires_at as expiresAt
-      FROM sanctions_cache 
-      WHERE address = ? AND expires_at > ?
-    `);
-
-    const row = stmt.get(address.toUpperCase(), new Date().toISOString());
-    
-    if (row) {
-      return {
-        ...row,
-        programs: JSON.parse(row.programs || '[]')
-      };
-    }
-    
-    return null;
-  }
-
-  /**
-   * Clean expired sanctions cache entries
-   * @returns {number} Number of entries cleaned
-   */
-  cleanExpiredSanctionsCache() {
-    const stmt = this.db.prepare(`
-      DELETE FROM sanctions_cache 
-      WHERE expires_at <= ?
-    `);
-
-    const result = stmt.run(new Date().toISOString());
-    return result.changes;
-  }
-
-  /**
-   * Get sanctions screening statistics
-   * @returns {Object} Statistics object
-   */
-  getSanctionsStatistics() {
-    const stats = {};
-
-    // Total violations
-    const totalViolationsStmt = this.db.prepare(`
-      SELECT COUNT(*) as count FROM sanctions_violations WHERE status = 'ACTIVE'
-    `);
-    stats.totalActiveViolations = totalViolationsStmt.get().count;
-
-    // Frozen leases
-    const frozenLeasesStmt = this.db.prepare(`
-      SELECT COUNT(*) as count FROM leases WHERE status = 'FROZEN'
-    `);
-    stats.frozenLeases = frozenLeasesStmt.get().count;
-
-    // Cache size
-    const cacheSizeStmt = this.db.prepare(`
-      SELECT COUNT(*) as count FROM sanctions_cache WHERE expires_at > ?
-    `);
-    stats.cacheSize = cacheSizeStmt.get(new Date().toISOString()).count;
-
-    // Violations by source
-    const violationsBySourceStmt = this.db.prepare(`
-      SELECT sanctions_source, COUNT(*) as count 
-      FROM sanctions_violations 
-      WHERE status = 'ACTIVE' 
-      GROUP BY sanctions_source
-    `);
-    stats.violationsBySource = violationsBySourceStmt.all();
-
-    return stats;
+    return row ?? null;
   }
 }
 

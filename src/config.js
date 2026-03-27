@@ -1,6 +1,7 @@
-const path = require('path');
+const path = require("path");
 
-const DEFAULT_CONTRACT_ID = 'CAEGD57WVTVQSYWYB23AISBW334QO7WNA5XQ56S45GH6BP3D2AVHKUG4';
+const DEFAULT_CONTRACT_ID =
+  "CAEGD57WVTVQSYWYB23AISBW334QO7WNA5XQ56S45GH6BP3D2AVHKUG4";
 
 
  /**
@@ -16,16 +17,16 @@ function loadConfig(env = process.env) {
   return {
     port: Number(env.PORT || 3000),
     auth: {
-      jwtSecret: env.AUTH_JWT_SECRET || 'development-only-leaseflow-secret',
-      issuer: env.AUTH_JWT_ISSUER || 'leaseflow-backend',
-      audience: env.AUTH_JWT_AUDIENCE || 'leaseflow-users',
+      jwtSecret: env.AUTH_JWT_SECRET || "development-only-leaseflow-secret",
+      issuer: env.AUTH_JWT_ISSUER || "leaseflow-backend",
+      audience: env.AUTH_JWT_AUDIENCE || "leaseflow-users",
     },
     database: {
       filename:
         env.DATABASE_FILENAME ||
-        (env.NODE_ENV === 'test'
-          ? ':memory:'
-          : path.join(process.cwd(), 'data', 'leaseflow-protocol.sqlite')),
+        (env.NODE_ENV === "test"
+          ? ":memory:"
+          : path.join(process.cwd(), "data", "leaseflow-protocol.sqlite")),
     },
     // --- 2. Added for Issue #9: Observability ---
     logging: {
@@ -33,8 +34,10 @@ function loadConfig(env = process.env) {
       logToFile: env.LOG_TO_FILE === 'true' || true,
     },
     jobs: {
-      renewalJobEnabled: env.LEASE_RENEWAL_JOB_ENABLED === 'true',
-      intervalMs: Number(env.LEASE_RENEWAL_JOB_INTERVAL_MS || 24 * 60 * 60 * 1000),
+      renewalJobEnabled: env.LEASE_RENEWAL_JOB_ENABLED === "true",
+      intervalMs: Number(
+        env.LEASE_RENEWAL_JOB_INTERVAL_MS || 24 * 60 * 60 * 1000,
+      ),
       scanWindowDays: Number(env.LEASE_RENEWAL_SCAN_WINDOW_DAYS || 0),
       // Added monitoring interval for the new Transaction Monitor
       monitorIntervalMs: Number(env.MONITOR_INTERVAL_MS || 10 * 1000), 
