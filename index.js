@@ -51,6 +51,8 @@ const {
 const {
   TenantCreditScoreAggregator,
 } = require("./tenantCreditScoreAggregator");
+const { LeasePartitioningService } = require("./src/services/leasePartitioningService");
+const { LeaseArchivalJob } = require("./src/jobs/leaseArchivalJob");
 
 // Routes
 const leaseRoutes = require("./src/routes/leaseRoutes");
@@ -61,6 +63,8 @@ const evictionNoticeRoutes = require("./src/routes/evictionNoticeRoutes");
 const vendorRoutes = require("./src/routes/vendorRoutes");
 const taxRoutes = require("./src/routes/taxRoutes");
 const propertyRoutes = require("./src/routes/propertyRoutes");
+const marketTrendsRoutes = require("./src/routes/marketTrendsRoutes");
+const referralRoutes = require("./src/routes/referralRoutes");
 
 const { LeaseCacheService } = require("./src/services/LeaseCacheService");
 
@@ -128,6 +132,8 @@ function createApp(dependencies = {}) {
   const depositGatekeeper =
     dependencies.securityDepositService || createSecurityDepositLockService();
   const leaseCacheService = dependencies.leaseCacheService || new LeaseCacheService(database);
+  const leasePartitioningService =
+    dependencies.leasePartitioningService || new LeasePartitioningService(database);
 
   // Inject for use in routes/controllers
   app.locals.database = database;
@@ -135,6 +141,7 @@ function createApp(dependencies = {}) {
   app.locals.assetMetadataService = assetMetadataService;
   app.locals.lateFeeService = lateFeeService;
   app.locals.leaseCacheService = leaseCacheService;
+  app.locals.leasePartitioningService = leasePartitioningService;
 
   // Middleware
   app.use(cors());
@@ -178,6 +185,8 @@ function createApp(dependencies = {}) {
   app.use('/api/vendors', vendorRoutes);
   app.use('/api/tax', taxRoutes);
   app.use('/api/properties', propertyRoutes);
+  app.use('/api/market-trends', marketTrendsRoutes);
+  app.use('/api/referrals', referralRoutes);
   app.use('/api', createPaymentRoutes(database));
 
   // --- Lease Renewal Routes ---
@@ -350,6 +359,16 @@ if (require.main === module) {
         e.message,
       );
     }
+
+    try {
+      await leasePartitioningService.initialize();
+      console.log("Lease partitioning service initialized");
+    } catch (e) {
+      console.warn(
+        "LeasePartitioningService failed to initialize:",
+        e.message,
+      );
+    }
   };
 
   initServices().finally(() => {
@@ -397,6 +416,17 @@ if (require.main === module) {
         .catch((err) => {
           console.warn("AutoReclaimWorker failed to initialize:", err.message);
         });
+
+      // Lease Archival Job (Task 2 - Table Partitioning)
+      if (config.jobs?.archivalJobEnabled) {
+        const archivalJob = new LeaseArchivalJob(leasePartitioningService, {
+          cronExpression: process.env.LEASE_ARCHIVAL_CRON || '0 2 1 * *',
+          monthsSinceExpiry: parseInt(process.env.LEASE_ARCHIVAL_MONTHS || '24', 10),
+          enabled: config.jobs.archivalJobEnabled
+        });
+        archivalJob.start();
+        console.log("Lease archival job started");
+      }
     });
   });
 }
