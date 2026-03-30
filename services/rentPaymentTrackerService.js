@@ -130,7 +130,28 @@ class RentPaymentTrackerService {
 
     // Update the lease payment status if we matched a lease.
     if (leaseId) {
-      this.database.updateLeasePaymentStatus(leaseId, 'paid', op.created_at);
+      const expectedRent = parseFloat(lease.rent_amount) || 0;
+      const paidAmount = parseFloat(op.amount);
+      const previousBalance = parseFloat(lease.remaining_balance) || 0;
+      
+      const totalDue = expectedRent + previousBalance;
+      
+      if (paidAmount < totalDue) {
+        const remainingBalance = totalDue - paidAmount;
+        const lateFeePercentage = 0.05; // 5% late fee on unpaid portion
+        const appliedLateFee = remainingBalance * lateFeePercentage;
+        
+        this.database.updateLeasePaymentStatus(leaseId, 'partial', op.created_at);
+        if (this.database.updateLeaseBalance) {
+          this.database.updateLeaseBalance(leaseId, remainingBalance, appliedLateFee);
+        }
+        console.warn(`[Debt Alert] Lease ${leaseId} partially paid. Remaining: ${remainingBalance}, Late Fee: ${appliedLateFee}`);
+      } else {
+        this.database.updateLeasePaymentStatus(leaseId, 'paid', op.created_at);
+        if (this.database.updateLeaseBalance) {
+          this.database.updateLeaseBalance(leaseId, 0, 0);
+        }
+      }
     }
 
     return 'recorded';
