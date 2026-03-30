@@ -65,6 +65,8 @@ class AppDatabase {
         bedrooms INTEGER,
         bathrooms INTEGER,
         square_footage INTEGER,
+        remaining_balance REAL DEFAULT 0,
+        applied_late_fee REAL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -452,6 +454,8 @@ class AppDatabase {
           end_date AS endDate,
           renewable,
           disputed,
+          remaining_balance AS remainingBalance,
+          applied_late_fee AS appliedLateFee,
           created_at AS createdAt,
           updated_at AS updatedAt
         FROM leases
@@ -484,6 +488,8 @@ class AppDatabase {
           disputed,
           tenant_account_id AS tenantAccountId,
           payment_status    AS paymentStatus,
+          remaining_balance AS remainingBalance,
+          applied_late_fee  AS appliedLateFee,
           last_payment_at   AS lastPaymentAt,
           created_at        AS createdAt,
           updated_at        AS updatedAt
@@ -1247,6 +1253,8 @@ class AppDatabase {
            renewable,
            disputed,
            payment_status    AS paymentStatus,
+           remaining_balance AS remainingBalance,
+           applied_late_fee  AS appliedLateFee,
            last_payment_at   AS lastPaymentAt,
            created_at        AS createdAt,
            updated_at        AS updatedAt
@@ -1259,6 +1267,26 @@ class AppDatabase {
       .get(tenantAccountId);
 
     return row ? normalizeLeaseRow(row) : null;
+  }
+
+  /**
+   * Update a lease's remaining balance and applied late fee.
+   *
+   * @param {string} leaseId Lease identifier.
+   * @param {number} remainingBalance The unpaid rent balance.
+   * @param {number} appliedLateFee The newly applied late fee.
+   * @returns {void}
+   */
+  updateLeaseBalance(leaseId, remainingBalance, appliedLateFee) {
+    this.db
+      .prepare(
+        `UPDATE leases
+         SET remaining_balance = ?,
+             applied_late_fee  = ?,
+             updated_at        = ?
+         WHERE id = ?`,
+      )
+      .run(remainingBalance, appliedLateFee, new Date().toISOString(), leaseId);
   }
 
   /**
