@@ -57,9 +57,14 @@ const {
 } = require("./tenantCreditScoreAggregator");
 const { LeasePartitioningService } = require("./src/services/leasePartitioningService");
 const { LeaseArchivalJob } = require("./src/jobs/leaseArchivalJob");
+const LeaseContractController = require("./src/controllers/LeaseContractController");
+const RwaAssetController = require("./src/controllers/RwaAssetController");
+const WebSocketSystem = require("./src/websocket");
 
 // Routes
 const leaseRoutes = require("./src/routes/leaseRoutes");
+const leaseContractRoutes = require("./src/routes/leaseContractRoutes");
+const rwaAssetRoutes = require("./src/routes/rwaAssetRoutes");
 const ownerRoutes = require("./src/routes/ownerRoutes");
 const kycRoutes = require("./src/routes/kycRoutes");
 const sanctionsRoutes = require("./src/routes/sanctionsRoutes");
@@ -152,6 +157,15 @@ function createApp(dependencies = {}) {
   const healthMonitor = new CollateralHealthMonitorWorker(database, notificationService, sorobanLeaseService, config.redis);
   const dunningSequencer = new RentDunningSequencer(database, notificationService, iotDispatcher, config.redis);
 
+  // Initialize Lease Contract Controller
+  const leaseContractController = new LeaseContractController(database, config);
+
+  // Initialize RWA Asset Controller
+  const rwaAssetController = new RwaAssetController(database, config);
+
+  // Initialize WebSocket System
+  const webSocketSystem = new WebSocketSystem(config, database);
+
   // Inject for use in routes/controllers
   app.locals.database = database;
   app.locals.availabilityService = availabilityService;
@@ -159,6 +173,9 @@ function createApp(dependencies = {}) {
   app.locals.lateFeeService = lateFeeService;
   app.locals.leaseCacheService = leaseCacheService;
   app.locals.leasePartitioningService = leasePartitioningService;
+  app.locals.leaseContractController = leaseContractController;
+  app.locals.rwaAssetController = rwaAssetController;
+  app.locals.webSocketSystem = webSocketSystem;
   app.locals.iotDispatcher = iotDispatcher;
   app.locals.healthMonitor = healthMonitor;
   app.locals.dunningSequencer = dunningSequencer;
@@ -246,6 +263,8 @@ function createApp(dependencies = {}) {
 
   // --- API Routes ---
   app.use('/api/leases', leaseRoutes);
+  app.use('/api/v1/leases', leaseContractRoutes);
+  app.use('/api/v1/rwa', rwaAssetRoutes);
   app.use('/api/owners', ownerRoutes);
   app.use('/api/kyc', kycRoutes);
   app.use('/api/sanctions', sanctionsRoutes);
@@ -455,8 +474,8 @@ if (require.main === module) {
     }
   };
 
-  initServices().finally(() => {
-    app.listen(port, () => {
+  initServices().finally(async () => {
+    app.listen(port, async () => {
       console.log(`LeaseFlow Backend running at http://localhost:${port}`);
 
       // Background Jobs
@@ -515,6 +534,29 @@ if (require.main === module) {
       // Initialize New IoT & Health Monitoring Workers
       if (config.jobs?.healthMonitorEnabled) {
         healthMonitor.start();
+      }
+      
+      // Initialize Lease Contract Controller
+      if (config.jobs?.pdfGenerationEnabled !== false) {
+        leaseContractController.initialize();
+        console.log("Lease contract PDF generation service started");
+      }
+      
+      // Initialize RWA Asset Controller
+      if (config.rwaCache?.enabled !== false) {
+        rwaAssetController.initialize();
+        console.log("RWA asset cache service started");
+      }
+      
+      // Initialize WebSocket System
+      if (config.websocket?.enabled !== false) {
+        try {
+          await webSocketSystem.initialize(server);
+          await webSocketSystem.start();
+          console.log("WebSocket system started");
+        } catch (error) {
+          console.error("Failed to start WebSocket system:", error);
+        }
       }
       
       // Start Dunning Pub/Sub listener
