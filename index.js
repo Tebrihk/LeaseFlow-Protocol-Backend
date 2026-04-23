@@ -69,8 +69,12 @@ const taxRoutes = require("./src/routes/taxRoutes");
 const propertyRoutes = require("./src/routes/propertyRoutes");
 const marketTrendsRoutes = require("./src/routes/marketTrendsRoutes");
 const referralRoutes = require("./src/routes/referralRoutes");
+const oracleRoutes = require("./src/routes/oracleRoutes");
 
 const { LeaseCacheService } = require("./src/services/LeaseCacheService");
+const { IoT_Webhook_Dispatcher } = require("./src/services/IoT_Webhook_Dispatcher");
+const { CollateralHealthMonitorWorker } = require("./src/services/CollateralHealthMonitorWorker");
+const { RentDunningSequencer } = require("./src/services/RentDunningSequencer");
 
 // Audit Service
 const { AuditService } = require("./src/services/auditService");
@@ -143,6 +147,11 @@ function createApp(dependencies = {}) {
   const leasePartitioningService =
     dependencies.leasePartitioningService || new LeasePartitioningService(database);
 
+  // New Services for IoT, Oracle, and Financial Monitoring
+  const iotDispatcher = new IoT_Webhook_Dispatcher(database, config.redis);
+  const healthMonitor = new CollateralHealthMonitorWorker(database, notificationService, sorobanLeaseService, config.redis);
+  const dunningSequencer = new RentDunningSequencer(database, notificationService, iotDispatcher, config.redis);
+
   // Inject for use in routes/controllers
   app.locals.database = database;
   app.locals.availabilityService = availabilityService;
@@ -150,6 +159,9 @@ function createApp(dependencies = {}) {
   app.locals.lateFeeService = lateFeeService;
   app.locals.leaseCacheService = leaseCacheService;
   app.locals.leasePartitioningService = leasePartitioningService;
+  app.locals.iotDispatcher = iotDispatcher;
+  app.locals.healthMonitor = healthMonitor;
+  app.locals.dunningSequencer = dunningSequencer;
 
   // Middleware
   app.use(cors());
@@ -243,6 +255,7 @@ function createApp(dependencies = {}) {
   app.use('/api/properties', propertyRoutes);
   app.use('/api/market-trends', marketTrendsRoutes);
   app.use('/api/referrals', referralRoutes);
+  app.use('/api/v1/oracles', oracleRoutes(database));
   app.use('/api', createPaymentRoutes(database));
   app.use('/api/audit', createAuditRoutes(database));
 
@@ -498,6 +511,15 @@ if (require.main === module) {
         archivalJob.start();
         console.log("Lease archival job started");
       }
+
+      // Initialize New IoT & Health Monitoring Workers
+      if (config.jobs?.healthMonitorEnabled) {
+        healthMonitor.start();
+      }
+      
+      // Start Dunning Pub/Sub listener
+      dunningSequencer.setupPubSub();
+      console.log("Rent dunning sequencer active");
     });
   });
 }
