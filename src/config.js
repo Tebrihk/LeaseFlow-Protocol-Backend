@@ -28,6 +28,12 @@ function loadConfig(env = process.env) {
           ? ":memory:"
           : path.join(process.cwd(), "data", "leaseflow-protocol.sqlite")),
     },
+    // --- Redis Configuration ---
+    redis: {
+      host: env.REDIS_HOST || '127.0.0.1',
+      port: Number(env.REDIS_PORT || 6379),
+      password: env.REDIS_PASSWORD || null,
+    },
     // --- 2. Added for Issue #9: Observability ---
     logging: {
       level: env.LOG_LEVEL || 'info',
@@ -40,7 +46,9 @@ function loadConfig(env = process.env) {
       ),
       scanWindowDays: Number(env.LEASE_RENEWAL_SCAN_WINDOW_DAYS || 0),
       // Added monitoring interval for the new Transaction Monitor
-      monitorIntervalMs: Number(env.MONITOR_INTERVAL_MS || 10 * 1000), 
+      monitorIntervalMs: Number(env.MONITOR_INTERVAL_MS || 10 * 1000),
+      healthMonitorEnabled: env.HEALTH_MONITOR_ENABLED !== "false",
+      archivalJobEnabled: env.LEASE_ARCHIVAL_JOB_ENABLED === "true",
     },
     contracts: {
       defaultContractId: env.SOROBAN_CONTRACT_ID || DEFAULT_CONTRACT_ID,

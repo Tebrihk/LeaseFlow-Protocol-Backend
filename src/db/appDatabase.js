@@ -339,6 +339,55 @@ class AppDatabase {
         updated_at TEXT NOT NULL,
         FOREIGN KEY (lease_id) REFERENCES leases(id)
       );
+
+      CREATE TABLE IF NOT EXISTS iot_audit_logs (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL,
+        retry_count INTEGER DEFAULT 0,
+        error_message TEXT,
+        dispatched_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS asset_condition_reports (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        report_data TEXT NOT NULL,
+        severity_tier TEXT,
+        slash_amount REAL,
+        oracle_signature TEXT,
+        s3_url TEXT,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS collateral_health_logs (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        health_factor REAL NOT NULL,
+        deposit_value_fiat REAL NOT NULL,
+        token_price REAL NOT NULL,
+        action_taken TEXT,
+        checked_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS dunning_sequences (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL UNIQUE,
+        current_step INTEGER NOT NULL,
+        last_step_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
     `);
   }
 
