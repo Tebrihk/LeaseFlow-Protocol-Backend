@@ -58,10 +58,12 @@ const {
 const { LeasePartitioningService } = require("./src/services/leasePartitioningService");
 const { LeaseArchivalJob } = require("./src/jobs/leaseArchivalJob");
 const LeaseContractController = require("./src/controllers/LeaseContractController");
+const RwaAssetController = require("./src/controllers/RwaAssetController");
 
 // Routes
 const leaseRoutes = require("./src/routes/leaseRoutes");
 const leaseContractRoutes = require("./src/routes/leaseContractRoutes");
+const rwaAssetRoutes = require("./src/routes/rwaAssetRoutes");
 const ownerRoutes = require("./src/routes/ownerRoutes");
 const kycRoutes = require("./src/routes/kycRoutes");
 const sanctionsRoutes = require("./src/routes/sanctionsRoutes");
@@ -157,6 +159,9 @@ function createApp(dependencies = {}) {
   // Initialize Lease Contract Controller
   const leaseContractController = new LeaseContractController(database, config);
 
+  // Initialize RWA Asset Controller
+  const rwaAssetController = new RwaAssetController(database, config);
+
   // Inject for use in routes/controllers
   app.locals.database = database;
   app.locals.availabilityService = availabilityService;
@@ -165,6 +170,7 @@ function createApp(dependencies = {}) {
   app.locals.leaseCacheService = leaseCacheService;
   app.locals.leasePartitioningService = leasePartitioningService;
   app.locals.leaseContractController = leaseContractController;
+  app.locals.rwaAssetController = rwaAssetController;
   app.locals.iotDispatcher = iotDispatcher;
   app.locals.healthMonitor = healthMonitor;
   app.locals.dunningSequencer = dunningSequencer;
@@ -253,6 +259,7 @@ function createApp(dependencies = {}) {
   // --- API Routes ---
   app.use('/api/leases', leaseRoutes);
   app.use('/api/v1/leases', leaseContractRoutes);
+  app.use('/api/v1/rwa', rwaAssetRoutes);
   app.use('/api/owners', ownerRoutes);
   app.use('/api/kyc', kycRoutes);
   app.use('/api/sanctions', sanctionsRoutes);
@@ -528,6 +535,12 @@ if (require.main === module) {
       if (config.jobs?.pdfGenerationEnabled !== false) {
         leaseContractController.initialize();
         console.log("Lease contract PDF generation service started");
+      }
+      
+      // Initialize RWA Asset Controller
+      if (config.rwaCache?.enabled !== false) {
+        rwaAssetController.initialize();
+        console.log("RWA asset cache service started");
       }
       
       // Start Dunning Pub/Sub listener
