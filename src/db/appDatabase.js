@@ -58,9 +58,13 @@ class AppDatabase {
         sanctions_status TEXT DEFAULT 'CLEAN',
         sanctions_check_at TEXT,
         sanctions_violation_count INTEGER DEFAULT 0,
+        parent_lease_id TEXT,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (parent_lease_id) REFERENCES leases(id) ON DELETE CASCADE
       );
+
+      CREATE INDEX IF NOT EXISTS idx_leases_parent_id ON leases(parent_lease_id);
 
       CREATE TABLE IF NOT EXISTS landlord_renewal_rules (
         id TEXT PRIMARY KEY,
