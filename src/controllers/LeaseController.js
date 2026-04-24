@@ -175,6 +175,78 @@ class LeaseController {
             return res.status(500).json({ error: 'Internal server error while retrieving hierarchy.', details: error.message });
         }
     }
+
+    /**
+     * Get lease status, checking Redis cache first.
+     * @route GET /api/leases/:leaseId/status
+     */
+    async getLeaseStatus(req, res) {
+        try {
+            const { leaseId } = req.params;
+            const cacheService = req.app.locals.leaseCacheService;
+
+            if (!cacheService) {
+                console.warn("[LeaseController] LeaseCacheService not found in app.locals.");
+                // Fallback to DB
+                const database = req.app.locals.database;
+                const lease = database.getLeaseById(leaseId);
+                return res.status(200).json({ success: true, data: lease });
+            }
+
+            const status = await cacheService.getLeaseStatus(leaseId);
+            if (!status) {
+                return res.status(404).json({ success: false, error: 'Lease not found' });
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: status
+            });
+        } catch (error) {
+            console.error('[LeaseController] Error fetching lease status:', error);
+            return res.status(500).json({ success: false, error: 'Internal server error' });
+        }
+    }
+
+    /**
+     * Enables the Purchase Option for a lease.
+     * @route POST /api/leases/:leaseId/purchase-option
+     */
+    async enablePurchaseOption(req, res) {
+        try {
+            const { leaseId } = req.params;
+            const { rentShare } = req.body;
+
+            if (rentShare === undefined || rentShare < 0 || rentShare > 1) {
+                return res.status(400).json({ 
+                    success: false, 
+                    error: 'Invalid rentShare. Must be between 0 and 1.' 
+                });
+            }
+
+            const database = req.app.locals.database;
+            const lease = database.getLeaseById(leaseId);
+
+            if (!lease) {
+                return res.status(404).json({ success: false, error: 'Lease not found' });
+            }
+
+            database.enablePurchaseOption(leaseId, rentShare);
+
+            return res.status(200).json({
+                success: true,
+                message: 'Purchase option enabled successfully.',
+                data: {
+                    leaseId,
+                    purchaseOptionEnabled: true,
+                    purchaseOptionRentShare: rentShare
+                }
+            });
+        } catch (error) {
+            console.error('[LeaseController] Error enabling purchase option:', error);
+            return res.status(500).json({ success: false, error: 'Internal server error' });
+        }
+    }
 }
 
 module.exports = new LeaseController();

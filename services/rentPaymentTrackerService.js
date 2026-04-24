@@ -19,10 +19,12 @@ const PAGE_LIMIT = 200;
 class RentPaymentTrackerService {
   /**
    * @param {import('../src/db/appDatabase').AppDatabase} database
+   * @param {import('../src/services/sorobanLeaseService').SorobanLeaseService} sorobanService
    * @param {{contractAccountId?: string}} [options]
    */
-  constructor(database, options = {}) {
+  constructor(database, sorobanService, options = {}) {
     this.database = database;
+    this.sorobanService = sorobanService;
     /** The Stellar account (contract or landlord escrow) to watch. */
     this.contractAccountId =
       options.contractAccountId ||
@@ -130,7 +132,53 @@ class RentPaymentTrackerService {
 
     // Update the lease payment status if we matched a lease.
     if (leaseId) {
-      this.database.updateLeasePaymentStatus(leaseId, 'paid', op.created_at);
+      const expectedRent = parseFloat(lease.rent_amount) || 0;
+      const paidAmount = parseFloat(op.amount);
+      const previousBalance = parseFloat(lease.remaining_balance) || 0;
+      
+      const totalDue = expectedRent + previousBalance;
+      
+      if (paidAmount < totalDue) {
+        const remainingBalance = totalDue - paidAmount;
+        const lateFeePercentage = 0.05; // 5% late fee on unpaid portion
+        const appliedLateFee = remainingBalance * lateFeePercentage;
+        
+        this.database.updateLeasePaymentStatus(leaseId, 'partial', op.created_at);
+        if (this.database.updateLeaseBalance) {
+          this.database.updateLeaseBalance(leaseId, remainingBalance, appliedLateFee);
+        }
+        console.warn(`[Debt Alert] Lease ${leaseId} partially paid. Remaining: ${remainingBalance}, Late Fee: ${appliedLateFee}`);
+      } else {
+        this.database.updateLeasePaymentStatus(leaseId, 'paid', op.created_at);
+        if (this.database.updateLeaseBalance) {
+          this.database.updateLeaseBalance(leaseId, 0, 0);
+        }
+      }
+
+      // Handle Purchase Option (Equity Earned)
+      if (lease.purchaseOptionEnabled && lease.purchaseOptionRentShare > 0) {
+        const equityEarned = paidAmount * lease.purchaseOptionRentShare;
+        const newPurchaseCredit = (lease.purchaseCredit || 0) + equityEarned;
+        
+        console.log(`[Purchase Option] Lease ${leaseId}: Earned ${equityEarned} equity. New balance: ${newPurchaseCredit}`);
+        
+        if (this.database.updatePurchaseCredit) {
+          this.database.updatePurchaseCredit(leaseId, newPurchaseCredit);
+        }
+
+        // Sync with Soroban contract
+        if (this.sorobanService && this.sorobanService.updatePurchaseCredit) {
+          try {
+            this.sorobanService.updatePurchaseCredit({
+              leaseId,
+              tenantId: lease.tenantId,
+              purchaseCredit: newPurchaseCredit,
+            });
+          } catch (err) {
+            console.error(`[Soroban Error] Failed to update purchase credit for lease ${leaseId}:`, err.message);
+          }
+        }
+      }
     }
 
     return 'recorded';

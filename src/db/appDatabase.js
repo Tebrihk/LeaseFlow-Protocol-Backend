@@ -182,6 +182,207 @@ class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_sanctions_cache_address ON sanctions_cache(address);
       CREATE INDEX IF NOT EXISTS idx_sanctions_cache_source ON sanctions_cache(source);
       CREATE INDEX IF NOT EXISTS idx_sanctions_cache_expires_at ON sanctions_cache(expires_at);
+
+      CREATE TABLE IF NOT EXISTS maintenance_jobs (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        description TEXT NOT NULL,
+        contractor_wallet TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS vendor_payment_authorizations (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        landlord_id TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'authorized',
+        created_at TEXT NOT NULL,
+        paid_at TEXT,
+        FOREIGN KEY (lease_id) REFERENCES leases(id),
+        FOREIGN KEY (job_id) REFERENCES maintenance_jobs(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS vendors (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        phone TEXT,
+        company_name TEXT,
+        license_number TEXT,
+        specialties TEXT,
+        kyc_status TEXT DEFAULT 'pending',
+        stellar_account_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS maintenance_tickets (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        vendor_id TEXT,
+        landlord_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        category TEXT,
+        priority TEXT DEFAULT 'medium',
+        status TEXT DEFAULT 'open',
+        photos TEXT,
+        repair_photos TEXT,
+        notes TEXT,
+        tenant_notes TEXT,
+        opened_at TEXT,
+        in_progress_at TEXT,
+        resolved_at TEXT,
+        closed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id),
+        FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS vendor_access_grants (
+        id TEXT PRIMARY KEY,
+        vendor_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        maintenance_ticket_id TEXT,
+        granted_by TEXT NOT NULL,
+        access_type TEXT NOT NULL,
+        permissions TEXT,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        revoke_reason TEXT,
+        accessed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (vendor_id) REFERENCES vendors(id),
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS vendor_access_logs (
+        id TEXT PRIMARY KEY,
+        access_grant_id TEXT NOT NULL,
+        vendor_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        resource_accessed TEXT,
+        ip_address TEXT,
+        user_agent TEXT,
+        accessed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (access_grant_id) REFERENCES vendor_access_grants(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS rent_payments (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        amount_due INTEGER NOT NULL,
+        amount_paid INTEGER DEFAULT 0,
+        protocol_fee INTEGER DEFAULT 0,
+        date_paid TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS late_fee_terms (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL UNIQUE,
+        daily_rate REAL NOT NULL,
+        grace_period_days INTEGER NOT NULL,
+        max_fee_per_period REAL,
+        enabled INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS late_fee_ledger (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        rent_payment_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        days_late INTEGER NOT NULL,
+        daily_rate REAL NOT NULL,
+        fee_amount REAL NOT NULL,
+        pending_debt_total REAL NOT NULL,
+        soroban_tx_status TEXT,
+        soroban_tx_hash TEXT,
+        assessed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id),
+        FOREIGN KEY (rent_payment_id) REFERENCES rent_payments(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS payment_schedules (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        amount TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS iot_audit_logs (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL,
+        retry_count INTEGER DEFAULT 0,
+        error_message TEXT,
+        dispatched_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS asset_condition_reports (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        report_data TEXT NOT NULL,
+        severity_tier TEXT,
+        slash_amount REAL,
+        oracle_signature TEXT,
+        s3_url TEXT,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS collateral_health_logs (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        health_factor REAL NOT NULL,
+        deposit_value_fiat REAL NOT NULL,
+        token_price REAL NOT NULL,
+        action_taken TEXT,
+        checked_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS dunning_sequences (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL UNIQUE,
+        current_step INTEGER NOT NULL,
+        last_step_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
     `);
   }
 
@@ -218,9 +419,11 @@ class AppDatabase {
         `
         INSERT INTO leases (
           id, landlord_id, tenant_id, status, rent_amount, currency,
-          start_date, end_date, renewable, disputed, created_at, updated_at
+          start_date, end_date, renewable, disputed, 
+          purchase_option_enabled, purchase_option_rent_share, purchase_credit,
+          created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -234,6 +437,9 @@ class AppDatabase {
         lease.endDate,
         lease.renewable === false ? 0 : 1,
         lease.disputed === true ? 1 : 0,
+        lease.purchaseOptionEnabled === true || lease.purchaseOptionEnabled === 1 ? 1 : 0,
+        lease.purchaseOptionRentShare || 0,
+        lease.purchaseCredit || 0,
         now,
         now,
       );
@@ -297,6 +503,11 @@ class AppDatabase {
           end_date AS endDate,
           renewable,
           disputed,
+          remaining_balance AS remainingBalance,
+          applied_late_fee AS appliedLateFee,
+          purchase_option_enabled AS purchaseOptionEnabled,
+          purchase_option_rent_share AS purchaseOptionRentShare,
+          purchase_credit AS purchaseCredit,
           created_at AS createdAt,
           updated_at AS updatedAt
         FROM leases
@@ -329,6 +540,11 @@ class AppDatabase {
           disputed,
           tenant_account_id AS tenantAccountId,
           payment_status    AS paymentStatus,
+          remaining_balance AS remainingBalance,
+          applied_late_fee  AS appliedLateFee,
+          purchase_option_enabled AS purchaseOptionEnabled,
+          purchase_option_rent_share AS purchaseOptionRentShare,
+          purchase_credit AS purchaseCredit,
           last_payment_at   AS lastPaymentAt,
           created_at        AS createdAt,
           updated_at        AS updatedAt
@@ -875,8 +1091,8 @@ class AppDatabase {
     const now = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO rent_payments (id, lease_id, period, due_date, amount_due, amount_paid, date_paid, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO rent_payments (id, lease_id, period, due_date, amount_due, amount_paid, protocol_fee, date_paid, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -885,6 +1101,7 @@ class AppDatabase {
         payment.dueDate,
         payment.amountDue,
         payment.amountPaid || 0,
+        payment.protocolFee || 0,
         payment.datePaid || null,
         payment.status || "pending",
         now,
@@ -898,6 +1115,7 @@ class AppDatabase {
       .prepare(
         `SELECT id, lease_id AS leaseId, period, due_date AS dueDate,
                 amount_due AS amountDue, amount_paid AS amountPaid,
+                protocol_fee AS protocolFee,
                 date_paid AS datePaid, status,
                 created_at AS createdAt, updated_at AS updatedAt
          FROM rent_payments WHERE id = ?`,
@@ -1090,6 +1308,11 @@ class AppDatabase {
            renewable,
            disputed,
            payment_status    AS paymentStatus,
+           remaining_balance AS remainingBalance,
+           applied_late_fee  AS appliedLateFee,
+           purchase_option_enabled AS purchaseOptionEnabled,
+           purchase_option_rent_share AS purchaseOptionRentShare,
+           purchase_credit AS purchaseCredit,
            last_payment_at   AS lastPaymentAt,
            created_at        AS createdAt,
            updated_at        AS updatedAt
@@ -1102,6 +1325,63 @@ class AppDatabase {
       .get(tenantAccountId);
 
     return row ? normalizeLeaseRow(row) : null;
+  }
+
+  /**
+   * Update a lease's remaining balance and applied late fee.
+   *
+   * @param {string} leaseId Lease identifier.
+   * @param {number} remainingBalance The unpaid rent balance.
+   * @param {number} appliedLateFee The newly applied late fee.
+   * @returns {void}
+   */
+  updateLeaseBalance(leaseId, remainingBalance, appliedLateFee) {
+    this.db
+      .prepare(
+        `UPDATE leases
+         SET remaining_balance = ?,
+             applied_late_fee  = ?,
+             updated_at        = ?
+         WHERE id = ?`,
+      )
+      .run(remainingBalance, appliedLateFee, new Date().toISOString(), leaseId);
+  }
+
+  /**
+   * Update a lease's purchase credit (equity earned).
+   *
+   * @param {string} leaseId Lease identifier.
+   * @param {number} purchaseCredit The new total purchase credit.
+   * @returns {void}
+   */
+  updatePurchaseCredit(leaseId, purchaseCredit) {
+    this.db
+      .prepare(
+        `UPDATE leases
+         SET purchase_credit = ?,
+             updated_at      = ?
+         WHERE id = ?`,
+      )
+      .run(purchaseCredit, new Date().toISOString(), leaseId);
+  }
+
+  /**
+   * Enable and configure the purchase option for a lease.
+   *
+   * @param {string} leaseId Lease identifier.
+   * @param {number} rentShare Portion of rent (0.0 - 1.0) going toward purchase credit.
+   * @returns {void}
+   */
+  enablePurchaseOption(leaseId, rentShare) {
+    this.db
+      .prepare(
+        `UPDATE leases
+         SET purchase_option_enabled = 1,
+             purchase_option_rent_share = ?,
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(rentShare, new Date().toISOString(), leaseId);
   }
 
   /**
@@ -1233,6 +1513,129 @@ class AppDatabase {
 
     return row ?? null;
   }
+
+  // --- Maintenance Jobs & Vendor Payments (Issue #29) ---
+
+  /**
+   * Create a new maintenance job.
+   */
+  insertMaintenanceJob(job) {
+    const id = job.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO maintenance_jobs (id, lease_id, description, contractor_wallet, amount, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        job.leaseId,
+        job.description,
+        job.contractorWallet,
+        job.amount,
+        job.status || 'pending',
+        now,
+      );
+    return this.getMaintenanceJobById(id);
+  }
+
+  /**
+   * Fetch a maintenance job by ID.
+   */
+  getMaintenanceJobById(jobId) {
+    const row = this.db
+      .prepare(`SELECT * FROM maintenance_jobs WHERE id = ?`)
+      .get(jobId);
+    return row ? normalizeMaintenanceJobRow(row) : null;
+  }
+
+  /**
+   * Update maintenance job status.
+   */
+  updateMaintenanceJobStatus(jobId, status) {
+    const now = new Date().toISOString();
+    const completedAt = status === 'completed' ? now : null;
+    this.db
+      .prepare(`UPDATE maintenance_jobs SET status = ?, completed_at = ? WHERE id = ?`)
+      .run(status, completedAt, jobId);
+    return this.getMaintenanceJobById(jobId);
+  }
+
+  /**
+   * Create a vendor payment authorization.
+   */
+  insertVendorPaymentAuthorization(auth) {
+    const id = auth.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO vendor_payment_authorizations (id, lease_id, job_id, landlord_id, amount, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        auth.leaseId,
+        auth.jobId,
+        auth.landlordId,
+        auth.amount,
+        'authorized',
+        now,
+      );
+    return this.getVendorPaymentAuthorizationById(id);
+  }
+
+  /**
+   * Fetch a vendor payment authorization by ID.
+   */
+  getVendorPaymentAuthorizationById(authId) {
+    const row = this.db
+      .prepare(`SELECT * FROM vendor_payment_authorizations WHERE id = ?`)
+      .get(authId);
+    return row ? normalizeVendorPaymentRow(row) : null;
+  }
+
+  /**
+   * Mark a vendor payment authorization as paid.
+   */
+  markVendorPaymentAsPaid(authId) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`UPDATE vendor_payment_authorizations SET status = 'paid', paid_at = ? WHERE id = ?`)
+      .run(now, authId);
+    return this.getVendorPaymentAuthorizationById(authId);
+  }
+
+  /**
+   * List all maintenance maintenance expenses for tax deduction report (Issue #30).
+   */
+  listMaintenanceExpenses(landlordId, year) {
+      const startOfYear = `${year}-01-01`;
+      const endOfYear = `${year}-12-31`;
+      return this.db
+        .prepare(`
+            SELECT mj.* FROM maintenance_jobs mj
+            JOIN leases l ON mj.lease_id = l.id
+            WHERE l.landlord_id = ? AND mj.status = 'completed' AND mj.completed_at BETWEEN ? AND ?
+        `)
+        .all(landlordId, startOfYear, endOfYear)
+        .map(normalizeMaintenanceJobRow);
+  }
+
+  /**
+   * List all protocol fees paid for a specific year and landlord.
+   */
+  listProtocolFees(landlordId, year) {
+      const startOfYear = `${year}-01-01`;
+      const endOfYear = `${year}-12-31`;
+      return this.db
+        .prepare(`
+            SELECT rp.protocol_fee, rp.date_paid, rp.lease_id, l.landlord_id
+            FROM rent_payments rp
+            JOIN leases l ON rp.lease_id = l.id
+            WHERE l.landlord_id = ? AND rp.status = 'paid' AND rp.date_paid BETWEEN ? AND ?
+        `)
+        .all(landlordId, startOfYear, endOfYear);
+  }
 }
 
 function normalizeLeaseRow(row) {
@@ -1240,6 +1643,7 @@ function normalizeLeaseRow(row) {
     ...row,
     renewable: Boolean(row.renewable),
     disputed: Boolean(row.disputed),
+    purchaseOptionEnabled: Boolean(row.purchaseOptionEnabled),
   };
 }
 
@@ -1266,6 +1670,26 @@ function normalizeKycRow(row) {
   return {
     ...row,
     isVerified: row.kycStatus === 'verified'
+  };
+}
+
+/**
+ * Normalizes a maintenance job row.
+ */
+function normalizeMaintenanceJobRow(row) {
+  return {
+    ...row,
+    amount: Number(row.amount),
+  };
+}
+
+/**
+ * Normalizes a vendor payment authorization row.
+ */
+function normalizeVendorPaymentRow(row) {
+  return {
+    ...row,
+    amount: Number(row.amount),
   };
 }
 

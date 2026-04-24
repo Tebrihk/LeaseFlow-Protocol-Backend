@@ -11,6 +11,10 @@ const sharp = require("sharp");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpecs = require("./src/swagger");
 
+// Sentry Error Tracking
+const { SentryService, createSentryMiddleware } = require("./src/services/sentryService");
+const sentryService = new SentryService();
+
 // Services & Config
 const { loadConfig } = require("./src/config");
 const { AppDatabase } = require("./src/db/appDatabase");
@@ -51,10 +55,35 @@ const {
 const {
   TenantCreditScoreAggregator,
 } = require("./tenantCreditScoreAggregator");
+const { LeasePartitioningService } = require("./src/services/leasePartitioningService");
+const { LeaseArchivalJob } = require("./src/jobs/leaseArchivalJob");
+const LeaseContractController = require("./src/controllers/LeaseContractController");
+const RwaAssetController = require("./src/controllers/RwaAssetController");
+const WebSocketSystem = require("./src/websocket");
 
 // Routes
 const leaseRoutes = require("./src/routes/leaseRoutes");
+const leaseContractRoutes = require("./src/routes/leaseContractRoutes");
+const rwaAssetRoutes = require("./src/routes/rwaAssetRoutes");
 const ownerRoutes = require("./src/routes/ownerRoutes");
+const kycRoutes = require("./src/routes/kycRoutes");
+const sanctionsRoutes = require("./src/routes/sanctionsRoutes");
+const evictionNoticeRoutes = require("./src/routes/evictionNoticeRoutes");
+const vendorRoutes = require("./src/routes/vendorRoutes");
+const taxRoutes = require("./src/routes/taxRoutes");
+const propertyRoutes = require("./src/routes/propertyRoutes");
+const marketTrendsRoutes = require("./src/routes/marketTrendsRoutes");
+const referralRoutes = require("./src/routes/referralRoutes");
+const oracleRoutes = require("./src/routes/oracleRoutes");
+
+const { LeaseCacheService } = require("./src/services/LeaseCacheService");
+const { IoT_Webhook_Dispatcher } = require("./src/services/IoT_Webhook_Dispatcher");
+const { CollateralHealthMonitorWorker } = require("./src/services/CollateralHealthMonitorWorker");
+const { RentDunningSequencer } = require("./src/services/RentDunningSequencer");
+
+// Audit Service
+const { AuditService } = require("./src/services/auditService");
+const { createAuditRoutes } = require("./src/routes/auditRoutes");
 
 /**
  * Build authentication middleware for landlords and tenants.
@@ -119,17 +148,57 @@ function createApp(dependencies = {}) {
     createConditionProofService({ store: createFileConditionProofStore() });
   const depositGatekeeper =
     dependencies.securityDepositService || createSecurityDepositLockService();
+  const leaseCacheService = dependencies.leaseCacheService || new LeaseCacheService(database);
+  const leasePartitioningService =
+    dependencies.leasePartitioningService || new LeasePartitioningService(database);
+
+  // New Services for IoT, Oracle, and Financial Monitoring
+  const iotDispatcher = new IoT_Webhook_Dispatcher(database, config.redis);
+  const healthMonitor = new CollateralHealthMonitorWorker(database, notificationService, sorobanLeaseService, config.redis);
+  const dunningSequencer = new RentDunningSequencer(database, notificationService, iotDispatcher, config.redis);
+
+  // Initialize Lease Contract Controller
+  const leaseContractController = new LeaseContractController(database, config);
+
+  // Initialize RWA Asset Controller
+  const rwaAssetController = new RwaAssetController(database, config);
+
+  // Initialize WebSocket System
+  const webSocketSystem = new WebSocketSystem(config, database);
 
   // Inject for use in routes/controllers
   app.locals.database = database;
   app.locals.availabilityService = availabilityService;
   app.locals.assetMetadataService = assetMetadataService;
   app.locals.lateFeeService = lateFeeService;
+  app.locals.leaseCacheService = leaseCacheService;
+  app.locals.leasePartitioningService = leasePartitioningService;
+  app.locals.leaseContractController = leaseContractController;
+  app.locals.rwaAssetController = rwaAssetController;
+  app.locals.webSocketSystem = webSocketSystem;
+  app.locals.iotDispatcher = iotDispatcher;
+  app.locals.healthMonitor = healthMonitor;
+  app.locals.dunningSequencer = dunningSequencer;
+
+  // Redis client for price caching
+  if (!app.locals.redisClient) {
+    app.locals.redisClient = null; // Will be initialized lazily in service
+  }
 
   // Middleware
   app.use(cors());
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+  // Initialize Sentry
+  if (config.sentry?.dsn) {
+    sentryService.initialize(config.sentry);
+    app.use(createSentryMiddleware(sentryService));
+  }
+
+  // Audit Service
+  const auditService = new AuditService(database);
+  app.locals.auditService = auditService;
 
   // Static Files
   const uploadDir = path.join(__dirname, "uploads");
@@ -159,14 +228,65 @@ function createApp(dependencies = {}) {
     });
   });
 
+  // Health Check Endpoint for Load Balancers and Monitoring
+  app.get("/health", (req, res) => {
+    const health = {
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      environment: config.sentry?.environment || process.env.NODE_ENV || "development",
+      version: "1.0.0",
+    };
+
+    // Check database connectivity
+    try {
+      req.app.locals.database.db.prepare("SELECT 1").get();
+      health.database = "connected";
+    } catch (error) {
+      health.database = "disconnected";
+      health.status = "degraded";
+    }
+
+    // Check if Sentry monitoring is enabled
+    if (config.sentry?.dsn) {
+      health.monitoring = "enabled";
+    } else {
+      health.monitoring = "disabled";
+    }
+
+    // Check if audit logging is available
+    try {
+      req.app.locals.database.db.prepare("SELECT 1 FROM audit_log LIMIT 1").get();
+      health.audit_logging = "available";
+    } catch (error) {
+      health.audit_logging = "not_configured";
+    }
+
+    const statusCode = health.status === "ok" ? 200 : 503;
+    res.status(statusCode).json(health);
+  });
+
   // --- API Routes ---
   app.get('/api/leases/:id/hierarchy', requireActorAuth(actorAuthService), (req, res) => LeaseController.getLeaseHierarchy(req, res));
   app.use('/api/leases', leaseRoutes);
+  app.use('/api/v1/leases', leaseContractRoutes);
+  app.use('/api/v1/rwa', rwaAssetRoutes);
   app.use('/api/owners', ownerRoutes);
   app.use('/api/kyc', kycRoutes);
   app.use('/api/sanctions', sanctionsRoutes);
   app.use('/api/eviction-notices', evictionNoticeRoutes);
+  app.use('/api/vendors', vendorRoutes);
+  app.use('/api/tax', taxRoutes);
+  app.use('/api/properties', propertyRoutes);
+  app.use('/api/market-trends', marketTrendsRoutes);
+  app.use('/api/referrals', referralRoutes);
+  app.use('/api/v1/oracles', oracleRoutes(database));
   app.use('/api', createPaymentRoutes(database));
+  app.use('/api/audit', createAuditRoutes(database));
+  
+  // Proration Calculator Routes (Issue #93)
+  const prorationRoutes = require('./src/routes/prorationRoutes');
+  app.use('/api/v1', prorationRoutes);
 
   // --- New Feature Routes (v1) ---
   const disputeRoutes = require('./src/routes/disputeRoutes');
@@ -318,6 +438,20 @@ function createApp(dependencies = {}) {
 
   // Error Handler
   app.use((err, req, res, next) => {
+    // Log to Sentry if initialized
+    if (config.sentry?.dsn) {
+      sentryService.captureException(err, {
+        publicKey: req.actor?.publicKey,
+        leaseId: req.params.leaseId || req.body?.leaseId,
+        extra: {
+          path: req.path,
+          method: req.method,
+          body: req.body,
+          query: req.query,
+        },
+      });
+    }
+
     console.error("[App] Error:", err);
     res
       .status(500)
@@ -353,10 +487,20 @@ if (require.main === module) {
         e.message,
       );
     }
+
+    try {
+      await leasePartitioningService.initialize();
+      console.log("Lease partitioning service initialized");
+    } catch (e) {
+      console.warn(
+        "LeasePartitioningService failed to initialize:",
+        e.message,
+      );
+    }
   };
 
-  initServices().finally(() => {
-    app.listen(port, () => {
+  initServices().finally(async () => {
+    app.listen(port, async () => {
       console.log(`LeaseFlow Backend running at http://localhost:${port}`);
 
       // Background Jobs
@@ -384,7 +528,7 @@ if (require.main === module) {
 
       const reclaimWorker = new AutoReclaimWorker();
       // Payment Tracker
-      const paymentTrackerService = new RentPaymentTrackerService(database, {
+      const paymentTrackerService = new RentPaymentTrackerService(database, sorobanLeaseService, {
         contractAccountId: config.contracts?.defaultContractId,
       });
       startPaymentTrackerJob(paymentTrackerService, {
@@ -400,6 +544,49 @@ if (require.main === module) {
         .catch((err) => {
           console.warn("AutoReclaimWorker failed to initialize:", err.message);
         });
+
+      // Lease Archival Job (Task 2 - Table Partitioning)
+      if (config.jobs?.archivalJobEnabled) {
+        const archivalJob = new LeaseArchivalJob(leasePartitioningService, {
+          cronExpression: process.env.LEASE_ARCHIVAL_CRON || '0 2 1 * *',
+          monthsSinceExpiry: parseInt(process.env.LEASE_ARCHIVAL_MONTHS || '24', 10),
+          enabled: config.jobs.archivalJobEnabled
+        });
+        archivalJob.start();
+        console.log("Lease archival job started");
+      }
+
+      // Initialize New IoT & Health Monitoring Workers
+      if (config.jobs?.healthMonitorEnabled) {
+        healthMonitor.start();
+      }
+      
+      // Initialize Lease Contract Controller
+      if (config.jobs?.pdfGenerationEnabled !== false) {
+        leaseContractController.initialize();
+        console.log("Lease contract PDF generation service started");
+      }
+      
+      // Initialize RWA Asset Controller
+      if (config.rwaCache?.enabled !== false) {
+        rwaAssetController.initialize();
+        console.log("RWA asset cache service started");
+      }
+      
+      // Initialize WebSocket System
+      if (config.websocket?.enabled !== false) {
+        try {
+          await webSocketSystem.initialize(server);
+          await webSocketSystem.start();
+          console.log("WebSocket system started");
+        } catch (error) {
+          console.error("Failed to start WebSocket system:", error);
+        }
+      }
+      
+      // Start Dunning Pub/Sub listener
+      dunningSequencer.setupPubSub();
+      console.log("Rent dunning sequencer active");
     });
   });
 }
