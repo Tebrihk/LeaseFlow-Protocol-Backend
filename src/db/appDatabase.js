@@ -383,6 +383,51 @@ class AppDatabase {
         updated_at TEXT NOT NULL,
         FOREIGN KEY (lease_id) REFERENCES leases(id)
       );
+
+      -- Yield Earnings Tables for Issue #99
+      CREATE TABLE IF NOT EXISTS yield_earnings_lessor (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        lessor_pubkey TEXT NOT NULL,
+        harvest_tx_hash TEXT NOT NULL,
+        asset_code TEXT NOT NULL,
+        asset_issuer TEXT,
+        amount_stroops INTEGER NOT NULL,
+        amount_decimal REAL NOT NULL,
+        fiat_equivalent REAL,
+        fiat_currency TEXT,
+        price_at_harvest REAL,
+        harvested_at TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessor_lease_id ON yield_earnings_lessor(lease_id);
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessor_pubkey ON yield_earnings_lessor(lessor_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessor_harvested_at ON yield_earnings_lessor(harvested_at);
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessor_asset ON yield_earnings_lessor(asset_code, asset_issuer);
+
+      CREATE TABLE IF NOT EXISTS yield_earnings_lessee (
+        id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        lessee_pubkey TEXT NOT NULL,
+        harvest_tx_hash TEXT NOT NULL,
+        asset_code TEXT NOT NULL,
+        asset_issuer TEXT,
+        amount_stroops INTEGER NOT NULL,
+        amount_decimal REAL NOT NULL,
+        fiat_equivalent REAL,
+        fiat_currency TEXT,
+        price_at_harvest REAL,
+        harvested_at TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        FOREIGN KEY (lease_id) REFERENCES leases(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessee_lease_id ON yield_earnings_lessee(lease_id);
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessee_pubkey ON yield_earnings_lessee(lessee_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessee_harvested_at ON yield_earnings_lessee(harvested_at);
+      CREATE INDEX IF NOT EXISTS idx_yield_earnings_lessee_asset ON yield_earnings_lessee(asset_code, asset_issuer);
     `);
   }
 
@@ -1636,6 +1681,216 @@ class AppDatabase {
         `)
         .all(landlordId, startOfYear, endOfYear);
   }
+
+  // ---------------------------------------------------------------------------
+  // Yield Earnings Methods (Issue #99 - Automated Yield Distribution Sync & Analytics)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Insert yield earnings for lessor from EscrowYieldHarvested event.
+   */
+  insertYieldEarningsLessor(earnings) {
+    const id = earnings.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`
+        INSERT INTO yield_earnings_lessor (
+          id, lease_id, lessor_pubkey, harvest_tx_hash, asset_code, asset_issuer,
+          amount_stroops, amount_decimal, fiat_equivalent, fiat_currency,
+          price_at_harvest, harvested_at, recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        earnings.leaseId,
+        earnings.lessorPubkey,
+        earnings.harvestTxHash,
+        earnings.assetCode,
+        earnings.assetIssuer || null,
+        earnings.amountStroops,
+        earnings.amountDecimal,
+        earnings.fiatEquivalent || null,
+        earnings.fiatCurrency || null,
+        earnings.priceAtHarvest || null,
+        earnings.harvestedAt,
+        now
+      );
+    return this.getYieldEarningsLessorById(id);
+  }
+
+  /**
+   * Insert yield earnings for lessee from EscrowYieldHarvested event.
+   */
+  insertYieldEarningsLessee(earnings) {
+    const id = earnings.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`
+        INSERT INTO yield_earnings_lessee (
+          id, lease_id, lessee_pubkey, harvest_tx_hash, asset_code, asset_issuer,
+          amount_stroops, amount_decimal, fiat_equivalent, fiat_currency,
+          price_at_harvest, harvested_at, recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        earnings.leaseId,
+        earnings.lesseePubkey,
+        earnings.harvestTxHash,
+        earnings.assetCode,
+        earnings.assetIssuer || null,
+        earnings.amountStroops,
+        earnings.amountDecimal,
+        earnings.fiatEquivalent || null,
+        earnings.fiatCurrency || null,
+        earnings.priceAtHarvest || null,
+        earnings.harvestedAt,
+        now
+      );
+    return this.getYieldEarningsLesseeById(id);
+  }
+
+  /**
+   * Get yield earnings for lessor by ID.
+   */
+  getYieldEarningsLessorById(id) {
+    const row = this.db
+      .prepare(`SELECT * FROM yield_earnings_lessor WHERE id = ?`)
+      .get(id);
+    return row ? normalizeYieldEarningsRow(row) : null;
+  }
+
+  /**
+   * Get yield earnings for lessee by ID.
+   */
+  getYieldEarningsLesseeById(id) {
+    const row = this.db
+      .prepare(`SELECT * FROM yield_earnings_lessee WHERE id = ?`)
+      .get(id);
+    return row ? normalizeYieldEarningsRow(row) : null;
+  }
+
+  /**
+   * Get aggregated yield history for a user by pubkey.
+   * Aggregates earnings by month and asset for both lessor and lessee roles.
+   */
+  getYieldHistoryByPubkey(pubkey, startDate = null, endDate = null) {
+    const lessorQuery = `
+      SELECT 
+        strftime('%Y-%m', harvested_at) as month,
+        asset_code,
+        asset_issuer,
+        SUM(amount_decimal) as total_amount,
+        SUM(fiat_equivalent) as total_fiat_equivalent,
+        fiat_currency,
+        COUNT(*) as transaction_count,
+        'lessor' as role
+      FROM yield_earnings_lessor
+      WHERE lessor_pubkey = ?
+        ${startDate ? "AND harvested_at >= ?" : ""}
+        ${endDate ? "AND harvested_at <= ?" : ""}
+      GROUP BY strftime('%Y-%m', harvested_at), asset_code, asset_issuer, fiat_currency
+    `;
+
+    const lesseeQuery = `
+      SELECT 
+        strftime('%Y-%m', harvested_at) as month,
+        asset_code,
+        asset_issuer,
+        SUM(amount_decimal) as total_amount,
+        SUM(fiat_equivalent) as total_fiat_equivalent,
+        fiat_currency,
+        COUNT(*) as transaction_count,
+        'lessee' as role
+      FROM yield_earnings_lessee
+      WHERE lessee_pubkey = ?
+        ${startDate ? "AND harvested_at >= ?" : ""}
+        ${endDate ? "AND harvested_at <= ?" : ""}
+      GROUP BY strftime('%Y-%m', harvested_at), asset_code, asset_issuer, fiat_currency
+    `;
+
+    const params = [pubkey];
+    if (startDate) params.push(startDate);
+    if (endDate) params.push(endDate);
+
+    const lessorEarnings = this.db.prepare(lessorQuery).all(...params);
+    const lesseeEarnings = this.db.prepare(lesseeQuery).all(...params);
+
+    // Combine and sort by month descending
+    return [...lessorEarnings, ...lesseeEarnings]
+      .sort((a, b) => new Date(b.month) - new Date(a.month));
+  }
+
+  /**
+   * Get total yield earnings for a user across all time.
+   */
+  getTotalYieldEarningsByPubkey(pubkey) {
+    const lessorQuery = `
+      SELECT 
+        SUM(amount_decimal) as total_amount,
+        SUM(fiat_equivalent) as total_fiat_equivalent,
+        COUNT(*) as transaction_count,
+        'lessor' as role
+      FROM yield_earnings_lessor
+      WHERE lessor_pubkey = ?
+    `;
+
+    const lesseeQuery = `
+      SELECT 
+        SUM(amount_decimal) as total_amount,
+        SUM(fiat_equivalent) as total_fiat_equivalent,
+        COUNT(*) as transaction_count,
+        'lessee' as role
+      FROM yield_earnings_lessee
+      WHERE lessee_pubkey = ?
+    `;
+
+    const lessorTotal = this.db.prepare(lessorQuery).get(pubkey);
+    const lesseeTotal = this.db.prepare(lesseeQuery).get(pubkey);
+
+    return {
+      lessor: lessorTotal || { total_amount: 0, total_fiat_equivalent: 0, transaction_count: 0 },
+      lessee: lesseeTotal || { total_amount: 0, total_fiat_equivalent: 0, transaction_count: 0 },
+      combined: {
+        total_amount: (lessorTotal?.total_amount || 0) + (lesseeTotal?.total_amount || 0),
+        total_fiat_equivalent: (lessorTotal?.total_fiat_equivalent || 0) + (lesseeTotal?.total_fiat_equivalent || 0),
+        transaction_count: (lessorTotal?.transaction_count || 0) + (lesseeTotal?.transaction_count || 0)
+      }
+    };
+  }
+
+  /**
+   * Verify that fractional stroops from events match aggregated sums in database.
+   * Used for testing and reconciliation.
+   */
+  verifyYieldAggregation(leaseId, harvestTxHash) {
+    const lessorSum = this.db
+      .prepare(`
+        SELECT SUM(amount_stroops) as total_stroops, SUM(amount_decimal) as total_decimal
+        FROM yield_earnings_lessor
+        WHERE lease_id = ? AND harvest_tx_hash = ?
+      `)
+      .get(leaseId, harvestTxHash);
+
+    const lesseeSum = this.db
+      .prepare(`
+        SELECT SUM(amount_stroops) as total_stroops, SUM(amount_decimal) as total_decimal
+        FROM yield_earnings_lessee
+        WHERE lease_id = ? AND harvest_tx_hash = ?
+      `)
+      .get(leaseId, harvestTxHash);
+
+    return {
+      lessor: lessorSum || { total_stroops: 0, total_decimal: 0 },
+      lessee: lesseeSum || { total_stroops: 0, total_decimal: 0 },
+      combined: {
+        total_stroops: (lessorSum?.total_stroops || 0) + (lesseeSum?.total_stroops || 0),
+        total_decimal: (lessorSum?.total_decimal || 0) + (lesseeSum?.total_decimal || 0)
+      }
+    };
+  }
 }
 
 function normalizeLeaseRow(row) {
@@ -1690,6 +1945,19 @@ function normalizeVendorPaymentRow(row) {
   return {
     ...row,
     amount: Number(row.amount),
+  };
+}
+
+/**
+ * Normalizes a yield earnings row.
+ */
+function normalizeYieldEarningsRow(row) {
+  return {
+    ...row,
+    amountDecimal: Number(row.amount_decimal),
+    amountStroops: Number(row.amount_stroops),
+    fiatEquivalent: row.fiat_equivalent ? Number(row.fiat_equivalent) : null,
+    priceAtHarvest: row.price_at_harvest ? Number(row.price_at_harvest) : null,
   };
 }
 
