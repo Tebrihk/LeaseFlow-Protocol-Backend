@@ -2,6 +2,7 @@ import { SorobanRpc } from 'stellar-sdk';
 import { logLeaseEvent } from '../services/loggerService.js';
 import hierarchyService from '../services/LeaseHierarchyService.js';
 import metadataService from '../services/NftMetadataService.js';
+import { YieldService } from '../services/yieldService.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -71,6 +72,47 @@ export async function pollLeaseEvents() {
                 await hierarchyService.handleDerivedHierarchyBurned(eventData.root_lease_id);
                 // Invalidate all? For now just root
                 await metadataService.invalidateCache(CONTRACT_ID, eventData.root_lease_id);
+            }
+
+            // New EscrowYieldHarvested logic (Issue #99)
+            if (topics.some(t => t.includes('EscrowYieldHarvested'))) {
+                const eventData = parseEventValue(event.value);
+                console.log('[EventPoller] Processing EscrowYieldHarvested event:', eventData);
+                
+                try {
+                    // Initialize YieldService
+                    const { AppDatabase } = await import('../db/appDatabase.js');
+                    const database = new AppDatabase(process.env.DB_PATH || './leases.db');
+                    const yieldService = new YieldService(database);
+                    
+                    // Process the yield harvest event
+                    const result = await yieldService.processYieldHarvestEvent({
+                        lease_id: eventData.lease_id,
+                        harvest_tx_hash: event.txHash,
+                        asset_code: eventData.asset_code || 'XLM',
+                        asset_issuer: eventData.asset_issuer || null,
+                        total_yield_stroops: eventData.total_yield_stroops,
+                        lessor_pubkey: eventData.lessor_pubkey,
+                        lessee_pubkey: eventData.lessee_pubkey,
+                        harvested_at: new Date(event.timestamp || Date.now()).toISOString()
+                    });
+                    
+                    logLeaseEvent('EscrowYieldHarvested Processed', {
+                        leaseId: eventData.lease_id,
+                        txHash: event.txHash,
+                        totalProcessed: result.totalProcessed,
+                        lessorEarnings: result.lessorEarnings.id,
+                        lesseeEarnings: result.lesseeEarnings.id
+                    });
+                    
+                } catch (error) {
+                    console.error('[EventPoller] Error processing EscrowYieldHarvested:', error);
+                    logLeaseEvent('EscrowYieldHarvested Error', {
+                        leaseId: eventData.lease_id,
+                        txHash: event.txHash,
+                        error: error.message
+                    });
+                }
             }
         });
 

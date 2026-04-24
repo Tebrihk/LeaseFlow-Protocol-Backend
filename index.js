@@ -85,6 +85,9 @@ const { RentDunningSequencer } = require("./src/services/RentDunningSequencer");
 const { AuditService } = require("./src/services/auditService");
 const { createAuditRoutes } = require("./src/routes/auditRoutes");
 
+// Redis Service
+const { RedisService } = require("./src/services/redisService");
+
 /**
  * Build authentication middleware for landlords and tenants.
  *
@@ -180,10 +183,12 @@ function createApp(dependencies = {}) {
   app.locals.healthMonitor = healthMonitor;
   app.locals.dunningSequencer = dunningSequencer;
 
-  // Redis client for price caching
-  if (!app.locals.redisClient) {
-    app.locals.redisClient = null; // Will be initialized lazily in service
-  }
+  // Initialize Redis Service
+  const redisService = new RedisService(config);
+  app.locals.redisService = redisService;
+  
+  // Initialize Redis client (lazy initialization)
+  app.locals.redisClient = null; // Will be initialized when needed
 
   // Middleware
   app.use(cors());
@@ -292,6 +297,7 @@ function createApp(dependencies = {}) {
   const disputeRoutes = require('./src/routes/disputeRoutes');
   const metadataRoutes = require('./src/routes/metadataRoutes');
   const invitationRoutes = require('./src/routes/invitationRoutes');
+  const { createYieldRoutes } = require('./src/routes/yieldRoutes');
 
   // Apply auth to dispute and invitation roots
   app.use('/api/v1/disputes', requireActorAuth(actorAuthService), disputeRoutes);
@@ -302,6 +308,15 @@ function createApp(dependencies = {}) {
       return requireActorAuth(actorAuthService)(req, res, next);
   }, invitationRoutes);
   app.use('/api/v1/metadata', metadataRoutes); // Publicly accessible for marketplaces
+  
+  // Yield Analytics Routes (Issue #99) - Publicly accessible with pubkey validation
+  app.use('/api/v1', async (req, res, next) => {
+    // Initialize Redis client for yield routes if needed
+    if (!app.locals.redisClient && app.locals.redisService) {
+      app.locals.redisClient = await app.locals.redisService.getWorkingClient();
+    }
+    next();
+  }, createYieldRoutes(database, app.locals.redisClient));
 
   // --- Lease Renewal Routes ---
   app.get(
