@@ -122,6 +122,58 @@ class LeaseController {
             console.error('[LeaseController] Error fetching active leases:', error);
             return res.status(500).json({ error: 'Internal server error while retrieving active leases.', details: error.message });
         }
+    /**
+     * Retrieves the lease hierarchy for a given lease ID.
+     * Implements strict access controls: master lessor sees tree, sub-lessee sees only their node.
+     * @route GET /api/leases/:id/hierarchy
+     */
+    async getLeaseHierarchy(req, res) {
+        try {
+            const { id } = req.params;
+            const actor = req.actor; // Set by requireActorAuth middleware
+            
+            const hierarchyService = require('../services/LeaseHierarchyService');
+            const hierarchy = await hierarchyService.getLeaseHierarchy(id);
+
+            if (!hierarchy) {
+                return res.status(404).json({ error: "Lease hierarchy not found." });
+            }
+
+            // Access Control Logic
+            if (!actor) {
+                // If no actor (e.g. public call, if allowed by middleware)
+                // In this case, we'll assume it's protected by middleware but just in case
+                return res.status(401).json({ error: "Authentication required." });
+            }
+
+            const isMasterLessor = hierarchy.landlordId === actor.id;
+            const isTenant = hierarchy.tenantId === actor.id;
+
+            if (isMasterLessor) {
+                // Master lessor can see the whole tree
+                return res.status(200).json({
+                    status: 'success',
+                    data: hierarchy
+                });
+            } else if (isTenant) {
+                // Sub-lessee can only see their specific node (no children)
+                const nodeOnly = { ...hierarchy, children: [] };
+                return res.status(200).json({
+                    status: 'success',
+                    data: nodeOnly
+                });
+            } else {
+                // Check if they are a landlord/tenant further down the tree?
+                // The requirement says "a master lessor can see the tree, but a sub-lessee can only see their specific node."
+                // This implies if they aren't the root landlord or root tenant, they might be blocked or treated as sub-lessee of a sub-node.
+                // However, the route is /:id/hierarchy. If I call it for MY lease id, I should see it.
+                return res.status(403).json({ error: "Access denied. You are not authorized to view this hierarchy." });
+            }
+
+        } catch (error) {
+            console.error('[LeaseController] Error fetching hierarchy:', error);
+            return res.status(500).json({ error: 'Internal server error while retrieving hierarchy.', details: error.message });
+        }
     }
 
     /**

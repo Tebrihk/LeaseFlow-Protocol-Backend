@@ -123,7 +123,28 @@ router.get('/:leaseCID/handshake', (req, res) => LeaseController.getHandshake(re
  *                   items:
  *                     type: object
  */
-router.get('/active', (req, res) => LeaseController.getActiveLeases(req, res));
+/**
+ * @openapi
+ * /api/leases/{id}/hierarchy:
+ *   get:
+ *     summary: Retrieve lease hierarchy
+ *     description: Returns a nested JSON tree of all active subleases for the given lease ID.
+ *     tags: [Leases]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: A nested tree of subleases
+ *       403:
+ *         description: Unauthorized access (access control applied)
+ *       404:
+ *         description: Lease not found
+ */
+router.get('/:id/hierarchy', (req, res) => LeaseController.getLeaseHierarchy(req, res));
 
 /**
  * @openapi

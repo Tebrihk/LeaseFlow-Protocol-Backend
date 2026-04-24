@@ -267,6 +267,7 @@ function createApp(dependencies = {}) {
   });
 
   // --- API Routes ---
+  app.get('/api/leases/:id/hierarchy', requireActorAuth(actorAuthService), (req, res) => LeaseController.getLeaseHierarchy(req, res));
   app.use('/api/leases', leaseRoutes);
   app.use('/api/v1/leases', leaseContractRoutes);
   app.use('/api/v1/rwa', rwaAssetRoutes);
@@ -286,6 +287,21 @@ function createApp(dependencies = {}) {
   // Proration Calculator Routes (Issue #93)
   const prorationRoutes = require('./src/routes/prorationRoutes');
   app.use('/api/v1', prorationRoutes);
+
+  // --- New Feature Routes (v1) ---
+  const disputeRoutes = require('./src/routes/disputeRoutes');
+  const metadataRoutes = require('./src/routes/metadataRoutes');
+  const invitationRoutes = require('./src/routes/invitationRoutes');
+
+  // Apply auth to dispute and invitation roots
+  app.use('/api/v1/disputes', requireActorAuth(actorAuthService), disputeRoutes);
+  app.use('/api/v1/invites', (req, res, next) => {
+      // /accept doesn't strictly need actor auth if using cryptographic token, 
+      // but creation does. We'll handle it inside or apply selectively.
+      if (req.path === '/accept') return next();
+      return requireActorAuth(actorAuthService)(req, res, next);
+  }, invitationRoutes);
+  app.use('/api/v1/metadata', metadataRoutes); // Publicly accessible for marketplaces
 
   // --- Lease Renewal Routes ---
   app.get(
