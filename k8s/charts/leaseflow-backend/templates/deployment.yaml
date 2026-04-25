@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "leaseflow-backend.fullname" . }}
+  labels:
+    {{- include "leaseflow-backend.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "leaseflow-backend.selectorLabels" . | nindent 6 }}
+  {{- with .Values.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "leaseflow-backend.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "leaseflow-backend.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        # Wait for database to be ready
+        - name: wait-for-db
+          image: postgres:15-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ .Values.configMap.data.DB_HOST }} -p {{ .Values.configMap.data.DB_PORT }} -U {{ .Values.secrets.data.DB_USER }}; do
+                echo "Waiting for database..."
+                sleep 2
+              done
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.name }}
+                  key: DB_PASSWORD
+        # Wait for Redis to be ready
+        - name: wait-for-redis
+          image: redis:7-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until redis-cli -h {{ .Values.configMap.data.REDIS_HOST }} -p {{ .Values.configMap.data.REDIS_PORT }} ping; do
+                echo "Waiting for Redis..."
+                sleep 2
+              done
+      containers:
+        # Main application container
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+            # Metrics port
+            - name: metrics
+              containerPort: {{ .Values.metrics.prometheus.port }}
+              protocol: TCP
+          env:
+            # Environment variables from ConfigMap
+            {{- range $key, $value := .Values.configMap.data }}
+            - name: {{ $key }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $.Values.configMap.name }}
+                  key: {{ $key }}
+            {{- end }}
+            # Environment variables from Secrets
+            {{- range $key, $value := .Values.secrets.data }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secrets.name }}
+                  key: {{ $key }}
+            {{- end }}
+            # Additional environment variables
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # Liveness probe
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          # Readiness probe
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          # Startup probe
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          # Resource limits
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # Volume mounts
+          volumeMounts:
+            {{- range .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        # Sidecar container for log shipping (optional)
+        {{- if .Values.logging.elasticsearch.enabled }}
+        - name: log-shipper
+          image: fluent/fluent-bit:latest
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: FLUENT_ELASTICSEARCH_HOST
+              value: {{ .Values.logging.elasticsearch.host }}
+            - name: FLUENT_ELASTICSEARCH_PORT
+              value: "{{ .Values.logging.elasticsearch.port }}"
+            - name: FLUENT_ELASTICSEARCH_INDEX
+              value: {{ .Values.logging.elasticsearch.index }}
+          volumeMounts:
+            - name: logs
+              mountPath: /app/logs
+              readOnly: true
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        {{- end }}
+      # Volumes
+      volumes:
+        {{- range .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      # Node selector
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Affinity
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Tolerations
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Termination grace period for graceful shutdown
+      terminationGracePeriodSeconds: 60

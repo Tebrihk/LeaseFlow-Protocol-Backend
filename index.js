@@ -105,6 +105,9 @@ const { createHealthRoutes } = require("./src/routes/healthRoutes");
 // GraphQL Server Setup (#106)
 const { initializeGraphQL } = require("./src/graphql/server");
 
+// Graceful Shutdown Service (#117)
+const { GracefulShutdownService } = require("./src/services/gracefulShutdownService");
+
 /**
  * Build authentication middleware for landlords and tenants.
  *
@@ -574,8 +577,17 @@ if (require.main === module) {
   };
 
   initServices().finally(async () => {
-    app.listen(port, async () => {
+    const server = app.listen(port, async () => {
       console.log(`LeaseFlow Backend running at http://localhost:${port}`);
+
+      // Initialize Graceful Shutdown Service
+      const gracefulShutdownService = new GracefulShutdownService();
+      gracefulShutdownService.initialize(app, server, {
+        database,
+        redisService,
+        apolloServer: app.locals.apolloServer,
+        config
+      });
 
       // Background Jobs
       if (config.jobs?.renewalJobEnabled) {
@@ -587,27 +599,32 @@ if (require.main === module) {
           sorobanLeaseService,
           config,
         );
-        startLeaseRenewalScheduler(
+        const renewalJob = startLeaseRenewalScheduler(
           new LeaseRenewalJob(leaseRenewalService),
           config,
         );
+        gracefulShutdownService.registerBackgroundJob('leaseRenewal', renewalJob);
         console.log("Lease renewal scheduler started");
       }
 
       if (config.jobs?.lateFeeJobEnabled) {
         const lateFeeService = app.locals.lateFeeService;
-        startLateFeeScheduler(new LateFeeJob(lateFeeService), config);
+        const lateFeeJob = startLateFeeScheduler(new LateFeeJob(lateFeeService), config);
+        gracefulShutdownService.registerBackgroundJob('lateFee', lateFeeJob);
         console.log("Late fee enforcement scheduler started");
       }
 
       const reclaimWorker = new AutoReclaimWorker();
+      gracefulShutdownService.registerBackgroundJob('reclaimWorker', reclaimWorker);
+      
       // Payment Tracker
       const paymentTrackerService = new RentPaymentTrackerService(database, sorobanLeaseService, {
         contractAccountId: config.contracts?.defaultContractId,
       });
-      startPaymentTrackerJob(paymentTrackerService, {
+      const paymentTrackerJob = startPaymentTrackerJob(paymentTrackerService, {
         cronExpression: process.env.PAYMENT_TRACKER_CRON || "* * * * *",
       });
+      gracefulShutdownService.registerBackgroundJob('paymentTracker', paymentTrackerJob);
       console.log("Payment tracker job started");
 
       // Abandoned Asset Tracking Job

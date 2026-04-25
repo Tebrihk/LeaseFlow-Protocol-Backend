@@ -7,7 +7,7 @@ scalar Timestamp
 scalar JSON
 
 # Core Actor Types
-type Actor {
+type Actor @key(fields: "id") {
   id: ID!
   publicKey: String!
   role: ActorRole!
@@ -39,7 +39,7 @@ enum SanctionsStatus {
 }
 
 # Asset Types
-type Asset {
+type Asset @key(fields: "id") {
   id: ID!
   lessorId: ID!
   type: AssetType!
@@ -47,6 +47,14 @@ type Asset {
   metadata: JSON
   status: AssetStatus!
   conditionReports: [ConditionReport!]!
+  # RWA Metadata fields for Real World Assets
+  assetCondition: AssetCondition
+  geolocation: Geolocation
+  insuranceStatus: InsuranceStatus
+  imageUrls: [String!]!
+  ipfsMetadataCid: String
+  rwaTokenId: String
+  physicalTraits: PhysicalTraits
   createdAt: Timestamp!
   updatedAt: Timestamp!
 }
@@ -57,6 +65,79 @@ enum AssetType {
   VEHICLE
   EQUIPMENT
   REAL_WORLD_ASSET
+}
+
+# RWA Metadata Supporting Types
+type AssetCondition {
+  overall: ConditionRating!
+  structural: ConditionRating
+  mechanical: ConditionRating
+  cosmetic: ConditionRating
+  lastInspectedAt: Timestamp
+  inspectionReportUrl: String
+}
+
+enum ConditionRating {
+  EXCELLENT
+  GOOD
+  FAIR
+  POOR
+  DAMAGED
+}
+
+type Geolocation {
+  latitude: Float!
+  longitude: Float!
+  address: String
+  city: String
+  state: String
+  postalCode: String
+  country: String!
+  accuracyRadiusMeters: Float
+}
+
+type InsuranceStatus {
+  insured: Boolean!
+  provider: String
+  policyNumber: String
+  coverageAmount: Stroops
+  validUntil: Timestamp
+  claimHistory: [InsuranceClaim!]!
+}
+
+type InsuranceClaim {
+  id: ID!
+  claimDate: Timestamp!
+  amount: Stroops!
+  reason: String!
+  status: ClaimStatus!
+  resolvedAt: Timestamp
+}
+
+enum ClaimStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PAID
+}
+
+type PhysicalTraits {
+  yearManufactured: Int
+  make: String
+  model: String
+  serialNumber: String
+  dimensions: Dimensions
+  weight: Float
+  color: String
+  materials: [String!]
+  features: [String!]
+}
+
+type Dimensions {
+  length: Float
+  width: Float
+  height: Float
+  unit: String
 }
 
 enum AssetStatus {
@@ -95,7 +176,7 @@ enum ReportStatus {
 }
 
 # Lease Types
-type Lease {
+type Lease @key(fields: "id") {
   id: ID!
   landlordId: ID!
   tenantId: ID!

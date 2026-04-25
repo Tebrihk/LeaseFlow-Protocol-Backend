@@ -4,6 +4,7 @@ const { createServer } = require('http');
 const { SubscriptionServer } = require('subscriptions-transport-ws');
 const { execute, subscribe } = require('graphql');
 const { makeExecutableSchema } = require('@graphql-tools/schema');
+const { buildSubgraphSchema } = require('@apollo/subgraph');
 const { resolvers } = require('./resolvers');
 const { createGraphQLContext } = require('./context');
 const { DataLoaderFactory } = require('./dataloaders');
@@ -37,8 +38,8 @@ const typeDefs = fs.readFileSync(path.join(__dirname, 'schema.graphql'), 'utf8')
 function createApolloServer(app, dependencies) {
   const { database, redisService, config, rlsService } = dependencies;
 
-  // Create executable schema
-  const schema = makeExecutableSchema({
+  // Create executable schema with Federation support
+  const schema = buildSubgraphSchema({
     typeDefs,
     resolvers,
   });

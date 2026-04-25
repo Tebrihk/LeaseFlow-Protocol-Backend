@@ -1,0 +1,295 @@
+# Default values for LeaseFlow Backend Helm Chart
+# This file contains default configuration values for deploying the LeaseFlow Protocol Backend
+
+# Global configuration
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: ""
+
+# Replica configuration
+replicaCount: 3
+
+# Image configuration
+image:
+  registry: docker.io
+  repository: leaseflow/backend
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Image pull secrets
+imagePullSecrets: []
+
+# Service account configuration
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 4000
+  targetPort: 4000
+  annotations: {}
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    # cert-manager annotations for automatic TLS
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/issue-temporary-certificate: "true"
+    # nginx ingress annotations
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # rate limiting
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+  hosts:
+    - host: api.leaseflow.protocol
+      paths:
+        - path: /graphql(/|$)(.*)
+          pathType: ImplementationSpecific
+  tls:
+    - secretName: leaseflow-backend-tls
+      hosts:
+        - api.leaseflow.protocol
+
+# Resource configuration
+resources:
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+  # maxUnavailable: 1 # Alternative to minAvailable
+
+# Rolling update strategy
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Environment variables
+env:
+  - name: NODE_ENV
+    value: "production"
+  - name: PORT
+    value: "4000"
+  - name: LOG_LEVEL
+    value: "info"
+
+# ConfigMap for environment-specific configuration
+configMap:
+  enabled: true
+  name: "leaseflow-backend-config"
+  data:
+    # Database configuration (will be overridden by secrets)
+    DB_HOST: "postgresql-service"
+    DB_PORT: "5432"
+    DB_NAME: "leaseflow"
+    # Redis configuration
+    REDIS_HOST: "redis-service"
+    REDIS_PORT: "6379"
+    # IPFS configuration
+    IPFS_NODE_URL: "/ip4/127.0.0.1/tcp/5001"
+    # GraphQL configuration
+    GRAPHQL_PLAYGROUND_ENABLED: "false"
+    GRAPHQL_INTROSPECTION: "false"
+    # Federation configuration
+    FEDERATION_ENABLED: "true"
+    # Rate limiting
+    RATE_LIMIT_WINDOW_MS: "60000"
+    RATE_LIMIT_MAX_REQUESTS: "100"
+
+# Secret configuration
+secrets:
+  enabled: true
+  name: "leaseflow-backend-secrets"
+  # These should be provided via external secret management (Vault, etc.)
+  data:
+    # Database credentials
+    DB_USER: ""
+    DB_PASSWORD: ""
+    # Redis credentials
+    REDIS_PASSWORD: ""
+    # JWT secrets
+    JWT_SECRET: ""
+    # Stellar/Soroban configuration
+    STELLAR_NETWORK_PASSPHRASE: ""
+    SOROBAN_NETWORK_URL: ""
+    # External API keys
+    SENTRY_DSN: ""
+    # IPFS authentication (if needed)
+    IPFS_AUTH_HEADER: ""
+
+# Volume mounts
+volumes:
+  - name: tmp
+    emptyDir: {}
+  - name: logs
+    emptyDir: {}
+
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+  - name: logs
+    mountPath: /app/logs
+
+# Health checks
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Startup probe
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+
+# Service monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: ""
+    labels: {}
+    annotations: {}
+    interval: 30s
+    scrapeTimeout: 10s
+
+# Logging configuration
+logging:
+  level: "info"
+  format: "json"
+  # Elasticsearch/EFK stack configuration
+  elasticsearch:
+    enabled: false
+    host: ""
+    port: 9200
+    index: "leaseflow-backend"
+
+# Tracing configuration
+tracing:
+  enabled: false
+  jaeger:
+    endpoint: ""
+    service_name: "leaseflow-backend"
+
+# Metrics configuration
+metrics:
+  enabled: true
+  prometheus:
+    path: "/metrics"
+    port: 9090
+
+# Background workers
+workers:
+  enabled: true
+  replicaCount: 2
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+# Gateway configuration (for Apollo Federation)
+gateway:
+  enabled: false
+  image:
+    repository: leaseflow/gateway
+    tag: "latest"
+  replicaCount: 2
+  service:
+    port: 4000
+  ingress:
+    enabled: true
+    host: gateway.leaseflow.protocol
+
+# Database migration job
+migration:
+  enabled: true
+  image:
+    repository: leaseflow/backend
+    tag: "latest"
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+
+# Test configuration
+test:
+  enabled: true
+  image:
+    repository: leaseflow/backend-test
+    tag: "latest"
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
