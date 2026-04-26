@@ -450,8 +450,92 @@ const resolvers = {
     },
   },
 
-  // Type resolvers for resolving nested relationships using DataLoaders
+  // Federation reference resolvers for @key directives
+  Actor: {
+    __resolveReference: async (actor, { dataSources, user }) => {
+      return await dataSources.actors.getActorById(actor.id, user);
+    },
+  },
+
+  Asset: {
+    __resolveReference: async (asset, { dataSources, user }) => {
+      return await dataSources.assets.getAssetById(asset.id, user);
+    },
+    conditionReports: async (asset, _, { dataSources, user }) => {
+      // Condition reports need filtering by asset, so use data source
+      return await dataSources.conditionReports.getConditionReports({ assetId: asset.id }, user);
+    },
+    // RWA Metadata resolvers
+    assetCondition: async (asset, _, { dataSources, user }) => {
+      if (!asset.ipfsMetadataCid) return null;
+      
+      try {
+        const rwaService = require('../services/rwaMetadataService');
+        const metadata = await rwaService.getAssetMetadata(asset.ipfsMetadataCid, asset.id);
+        return metadata.assetCondition;
+      } catch (error) {
+        console.error(`[Asset] Failed to resolve assetCondition for asset ${asset.id}:`, error);
+        return null;
+      }
+    },
+    
+    geolocation: async (asset, _, { dataSources, user }) => {
+      if (!asset.ipfsMetadataCid) return null;
+      
+      try {
+        const rwaService = require('../services/rwaMetadataService');
+        const metadata = await rwaService.getAssetMetadata(asset.ipfsMetadataCid, asset.id);
+        return metadata.geolocation;
+      } catch (error) {
+        console.error(`[Asset] Failed to resolve geolocation for asset ${asset.id}:`, error);
+        return null;
+      }
+    },
+    
+    insuranceStatus: async (asset, _, { dataSources, user }) => {
+      if (!asset.ipfsMetadataCid) return null;
+      
+      try {
+        const rwaService = require('../services/rwaMetadataService');
+        const metadata = await rwaService.getAssetMetadata(asset.ipfsMetadataCid, asset.id);
+        return metadata.insuranceStatus;
+      } catch (error) {
+        console.error(`[Asset] Failed to resolve insuranceStatus for asset ${asset.id}:`, error);
+        return { insured: false };
+      }
+    },
+    
+    imageUrls: async (asset, _, { dataSources, user }) => {
+      if (!asset.ipfsMetadataCid) return [];
+      
+      try {
+        const rwaService = require('../services/rwaMetadataService');
+        const metadata = await rwaService.getAssetMetadata(asset.ipfsMetadataCid, asset.id);
+        return metadata.imageUrls || [];
+      } catch (error) {
+        console.error(`[Asset] Failed to resolve imageUrls for asset ${asset.id}:`, error);
+        return [];
+      }
+    },
+    
+    physicalTraits: async (asset, _, { dataSources, user }) => {
+      if (!asset.ipfsMetadataCid) return null;
+      
+      try {
+        const rwaService = require('../services/rwaMetadataService');
+        const metadata = await rwaService.getAssetMetadata(asset.ipfsMetadataCid, asset.id);
+        return metadata.physicalTraits;
+      } catch (error) {
+        console.error(`[Asset] Failed to resolve physicalTraits for asset ${asset.id}:`, error);
+        return null;
+      }
+    },
+  },
+
   Lease: {
+    __resolveReference: async (lease, { dataSources, user }) => {
+      return await dataSources.leases.getLeaseById(lease.id, user);
+    },
     asset: async (lease, _, { dataLoaders, user }) => {
       // Use DataLoader for efficient batching
       if (!lease.assetId) return null;
@@ -484,13 +568,7 @@ const resolvers = {
     },
   },
 
-  Asset: {
-    conditionReports: async (asset, _, { dataSources, user }) => {
-      // Condition reports need filtering by asset, so use data source
-      return await dataSources.conditionReports.getConditionReports({ assetId: asset.id }, user);
-    },
-  },
-
+  
   MaintenanceTicket: {
     vendor: async (ticket, _, { dataLoaders, user }) => {
       // Use DataLoader for efficient batching

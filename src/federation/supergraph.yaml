@@ -1,0 +1,6 @@
+# Apollo Federation Supergraph Configuration
+subgraphs:
+  leaseflow-core:
+    routing_url: http://localhost:4001/graphql
+    schema:
+      file: ./src/graphql/schema.graphql

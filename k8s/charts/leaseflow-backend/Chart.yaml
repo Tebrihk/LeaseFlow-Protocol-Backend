@@ -1,0 +1,24 @@
+apiVersion: v2
+name: leaseflow-backend
+description: A Helm chart for LeaseFlow Protocol Backend - GraphQL API with Apollo Federation support
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - graphql
+  - apollo-federation
+  - blockchain
+  - stellar
+  - soroban
+  - leasing
+  - rwa
+home: https://github.com/LeaseFlow-Protocol/LeaseFlow-Protocol-Backend
+sources:
+  - https://github.com/LeaseFlow-Protocol/LeaseFlow-Protocol-Backend
+maintainers:
+  - name: LeaseFlow Team
+    email: dev@leaseflow.protocol
+dependencies: []
+annotations:
+  category: Infrastructure
+  licenses: MIT
